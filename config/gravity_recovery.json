@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "selective_wrist_prepare": false,
+  "streamed_recovery": true,
+  "hold_speed_percent": 5,
+  "inset_deg": 0.5,
+  "max_start_excess_deg": 3.0,
+  "speed_percent": 1,
+  "timeout_s": 10.0,
+  "path_tolerance_deg": 0.25,
+  "feedback_speed_deg_s": 30.0
+}

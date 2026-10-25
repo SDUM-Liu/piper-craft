@@ -1,0 +1,27 @@
+# Environments and generated state
+.venv/
+.runtime/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+runs/
+config/verified.json
+
+# Credentials and private machine files
+.env
+.env.*
+!.env.example
+auth.json
+credentials.json
+*.pem
+*.key
+
+# Local experiment memory (README is shared)
+docs/memory/state.json
+docs/memory/current.md
+docs/memory/problems.md
+docs/memory/.lock

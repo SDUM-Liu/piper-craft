@@ -1,0 +1,13 @@
+{
+  "slow": {"translation_m_s": 0.005, "rotation_deg_s": 2.0},
+  "normal": {},
+  "fast": {
+    "translation_m_s": 0.1,
+    "rotation_deg_s": 10.0,
+    "control_hz": 50,
+    "geometry_timeout_s": 0.018,
+    "position_lead_m": 0.008,
+    "joint_lead_deg": 6.0,
+    "input_timeout_s": 0.1
+  }
+}

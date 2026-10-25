@@ -1,0 +1,20 @@
+{
+  "follow_mode": "position_velocity",
+  "control_hz": 20,
+  "input_timeout_s": 0.25,
+  "geometry_timeout_s": 0.045,
+  "translation_m_s": 0.02,
+  "rotation_deg_s": 5.0,
+  "gripper_m_s": 0.005,
+  "gripper_effort": 0.5,
+  "speed_percent": 20,
+  "position_lead_m": 0.002,
+  "rotation_lead_deg": 0.5,
+  "joint_acceleration_deg_s2": 120.0,
+  "joint_lead_deg": 2.0,
+  "tcp_drift_m": 0.002,
+  "axis_convention": "piper_tool",
+  "ik_solver": "casadi_ipopt",
+  "vertical_frame": "base",
+  "gripper_opening_lead_m": 0.003
+}

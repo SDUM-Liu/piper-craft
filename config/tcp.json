@@ -1,0 +1,66 @@
+{
+  "_comment": "TCP at joint6 with zero offset. Set T_ee_tcp for the actual tool before operating.",
+  "arms": {
+    "left": {
+      "T_ee_tcp": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "right": {
+      "T_ee_tcp": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  "source": "operator_configured",
+  "configured": true,
+  "projection_required": false,
+  "frame": "joint6",
+  "units": "metres"
+}

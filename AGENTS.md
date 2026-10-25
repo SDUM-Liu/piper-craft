@@ -1,0 +1,13 @@
+# PIPER CRAFT maintenance
+
+- Read `docs/memory/README.md`, `current.md` and `problems.md` before working. A new checkout initializes the latter two using `python -m astra_vla.operation_memory compact`; machine operation history is local and untracked.
+- Maintain the RGB desktop, local IK / ordinary MOVE_J and controller-native MOVE_P backends, joint jog controls, and whole-window recording.
+- Before real motion, observe fresh RGB and both arms' feedback. Startup is observation only. Retain input timeout, stop, controller-health, feedback freshness and self-collision protections. Never infer physical support or permission to reset/disable an arm from historical notes.
+- SDK end-effector feedback is authoritative. Local FK is for IK and robot geometry; do not compare it to, or replace, SDK pose feedback.
+- Local ordinary control retains acceleration, following budgets and full-path self-collision. Controller-native control uses actual queried controller angle bounds, TCP following budgets and current geometry checks; it does not cover future controller paths. Joint jog is local-only direct ordinary MOVE_J with full path checks and no TCP IK/detour.
+- Opening menus, focus loss, switching arms/backends/profiles and stopping clear input; never resume old keys automatically. Do not treat UI demos or offline tests as physical acceptance.
+- Observe all three RGB views, including the unselected arm's wrist camera. Moving an observation arm is a real motion and needs the same scene/feedback checks. See `docs/field_notes.md` for limited field experience.
+- Keep `selective_wrist_prepare` off. Existing recovery behavior is distinct from ordinary control; see `docs/teleop.md`. Do not generalize its limited field validation to other starts or hardware.
+- Update an existing problem in place, separating observation, inference, change, validation and evidence. Never record simulation, static reads or offline tests as real hardware success.
+- After maintenance run `python -m astra_vla.operation_memory compact` and `python scripts/check_robot_memory.py`. Each memory page is at most 100 lines, all pages at most 260 lines, with at most 12 sessions and 8 problems.
+- Keep recordings and operation evidence in ignored `runs/`. Preserve conclusions and necessary evidence before cleaning local records. Never commit credentials, private operation logs or camera recordings by default.

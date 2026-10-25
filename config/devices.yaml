@@ -1,0 +1,70 @@
+# Example only: replace paths, CAN interfaces and USB serials for your installation.
+robot_python: ~/miniconda3/envs/piper-craft-robot/bin/python
+ros_python: /usr/bin/python3
+ros_setup: ../pika_ros/install/setup.bash
+gripper_model: piper
+urdf: ../pika_ros/src/PikaAnyArm/piper/piper_ros/piper_description/urdf/piper_description.urdf
+package_dirs:
+- ../pika_ros/src/PikaAnyArm/piper/piper_ros
+- ../pika_ros/src
+arms:
+  left: left_piper
+  right: right_piper
+tcp:
+  left:
+    T_ee_tcp:
+    - - 1
+      - 0
+      - 0
+      - 0
+    - - 0
+      - 1
+      - 0
+      - 0
+    - - 0
+      - 0
+      - 1
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 1
+  right:
+    T_ee_tcp:
+    - - 1
+      - 0
+      - 0
+      - 0
+    - - 0
+      - 1
+      - 0
+      - 0
+    - - 0
+      - 0
+      - 1
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 1
+cameras:
+  top:
+    serial: REPLACE_WITH_TOP_USB_SERIAL
+    color: /top_camera/color/image_raw
+  left_wrist:
+    serial: REPLACE_WITH_LEFT_WRIST_USB_SERIAL
+    color: /left_wrist_camera/color/image_raw
+  right_wrist:
+    serial: REPLACE_WITH_RIGHT_WRIST_USB_SERIAL
+    color: /right_wrist_camera/color/image_raw
+limits:
+  disabled_start_joint_tolerance_deg: 3.0
+  disabled_start_tolerance_joints:
+  - 2
+  - 3
+  maintenance_gripper_max_m:
+    left: 0.065
+    right: 0.0855
+  camera_age_s: 0.6
+  state_age_s: 0.3
+rgb_python: .venv/bin/python
