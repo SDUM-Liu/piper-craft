@@ -42,7 +42,7 @@ def test_native_sends_pose_only_and_never_calls_local_ik(controller):
     submit = f.robot.geometry_pool.submit
 
     def measured_only(function, *args):
-        assert function.__name__ in ("geometry_hold", "geometry_probe_ready"), "local IK/path solver called"
+        assert function.__name__ in ("native_feedback", "geometry_probe_ready"), "local IK/path solver called"
         return submit(function, *args)
 
     f.robot.geometry_pool.submit = measured_only
@@ -53,7 +53,8 @@ def test_native_sends_pose_only_and_never_calls_local_ik(controller):
     assert any(m == "EndPoseCtrl" for _, m, _ in f.commands)
     assert ("right", "MotionCtrl_2", (1, 0, 5, 0)) in f.commands
     assert f.manager.view()["ik_solver"] == "controller"
-    assert f.manager.view()["path_precheck"] == "measured_geometry_only"
+    assert f.manager.view()["path_precheck"] == "none"
+    assert f.manager.view()["collision_scope"] == "none"
     f.manager.input({"session": session, "sequence": 1, "keys": []})
     assert f.manager.phase == "pausing"
     assert f.commands[-1] == ("right", "MotionCtrl_1", (0, 1, 0))

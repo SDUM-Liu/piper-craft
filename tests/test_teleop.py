@@ -243,7 +243,7 @@ def controller(tmp_path, monkeypatch):
                 return {'tcp_target': arguments[2]['tcp_target'].tolist(),
                         'adjustment_deg': 0., 'progress': 1.}
             return SimpleNamespace(result=selected, cancel=lambda: None)
-        if not arguments or _function.__name__ == 'geometry_hold':
+        if not arguments or _function.__name__ in ('geometry_hold', 'native_feedback'):
             return SimpleNamespace(result=lambda **_: True)
         def result(timeout):
             if completion[0]:

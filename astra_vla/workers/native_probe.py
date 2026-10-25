@@ -56,21 +56,18 @@ class NativeProbe:
             raise RuntimeError("native probe joint departure exceeds 8 degrees")
 
     def send_native_probe(self, proposal, before, keys, generation, started, mark):
-        # Only measured self geometry is checked here. The controller's future
-        # joint path is unavailable; this is NOT the normal full-path precheck.
-        from astra_vla.workers.teleop import geometry_hold, geometry_native_step, CalculationExpired, SendWindowExpired
+        # Native MOVE_P deliberately does not query local URDF collisions.
+        # Feedback, target feasibility, cancellation and tracking remain checked.
+        from astra_vla.workers.teleop import native_feedback, geometry_native_step, CalculationExpired, SendWindowExpired
         from astra_vla.native_pose import NativePoseUnavailable
         from dataclasses import asdict
 
         self.native_probe_bounds(before[self.arm], proposal["tcp_target"])
-        geometry = dict(self.geometry)
-        if proposal['gripper_motion']:
-            geometry['unverified_gripper_max_m'] = max(before[self.arm]['gripper']['width_m'], proposal['width_m'])
         if self.native_pose_probe or not proposal['arm_motion']:
-            job = self.robot.geometry_pool.submit(geometry_hold, before[self.arm], geometry)
+            job = self.robot.geometry_pool.submit(native_feedback, before[self.arm], self.geometry)
         else:
             relax = bool(keys & TRANSLATION_KEYS) and not keys & {'i', 'k', 'j', 'l', 'o', 'p'}
-            job = self.robot.geometry_pool.submit(geometry_native_step, before[self.arm], geometry,
+            job = self.robot.geometry_pool.submit(geometry_native_step, before[self.arm], self.geometry,
                 proposal, self.native_limits, asdict(self.policy), relax)
         try:
             selected = job.result(timeout=self.policy.geometry_timeout_s)
@@ -83,7 +80,7 @@ class NativeProbe:
                                 speed_fraction=proposal['speed_fraction']*selected['progress'])
                 self.native_adjustment_deg = selected['adjustment_deg']
             elif selected is not True:
-                raise RuntimeError("native probe measured geometry rejected")
+                raise RuntimeError("native feedback validation rejected")
         except NativePoseUnavailable as exc:
             with self.mutex:
                 if not self.active or generation != self.generation:
@@ -96,8 +93,8 @@ class NativeProbe:
             return
         except (TimeoutError, FutureTimeoutError) as exc:
             job.cancel()
-            raise CalculationExpired("native probe measured geometry timeout") from exc
-        mark("measured_geometry")
+            raise CalculationExpired("native validation timeout") from exc
+        mark("native_validation")
         target = pose_sdk(proposal["ee_target"])
         with self.robot.tx_lock, self.mutex:
             if (
@@ -171,7 +168,7 @@ class NativeProbe:
                 state=before,
                 width_m=proposal["width_m"],
                 ik={"solver": "controller"},
-                geometry_scope="measured_only",
+                geometry_scope="none",
                 automatic_orientation=not self.native_pose_probe,
                 orientation_adjustment_deg=getattr(self, 'native_adjustment_deg', 0.),
             )

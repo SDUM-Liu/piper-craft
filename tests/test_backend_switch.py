@@ -17,6 +17,60 @@ def native_session(f, arm='left', profile='normal'):
     return f.manager.open({'arm': arm, 'speed_profile': profile, 'execution_backend': 'controller_move_p'})['session']
 
 
+@pytest.mark.parametrize('probe,keys', [(False, ['w']), (False, ['k']), (False, ['q']),
+                                      (False, ['e']), (False, ['w', 'q']), (True, ['space'])])
+def test_native_entry_and_writes_never_query_local_collision_model(controller, monkeypatch, probe, keys):
+    from types import SimpleNamespace
+    from astra_vla.workers import teleop
+    from astra_vla import native_pose
+    f = controller
+    def forbidden(*args, **kwargs):
+        raise AssertionError('native control queried local collision geometry')
+    monkeypatch.setattr(teleop, '_geometry_model', SimpleNamespace(
+        check_hold=forbidden, bounded_gripper_contacts=forbidden))
+    monkeypatch.setattr(native_pose, 'adapt_target', lambda state, proposal, *args, **kwargs:
+                        {'tcp_target': proposal['tcp_target'].tolist(), 'progress': 1., 'adjustment_deg': 0.})
+    original = f.robot.geometry_pool.submit
+    def submit(function, *args):
+        if function in (teleop.native_feedback, teleop.geometry_native_step):
+            return SimpleNamespace(result=lambda **kwargs: function(*args), cancel=lambda: None)
+        if function is teleop.geometry_hold:
+            forbidden()
+        return original(function, *args)
+    f.robot.geometry_pool.submit = submit
+    if probe:
+        from test_native_probe import open_probe
+        session = open_probe(f)
+    else:
+        session = native_session(f, 'right')
+    assert not f.commands  # Entry remains observation-only.
+    f.manager.input({'session': session, 'sequence': 0, 'keys': keys})
+    f.manager.step()
+    assert any(method == 'EndPoseCtrl' for _, method, _ in f.commands)
+    if 'q' in keys or 'e' in keys:
+        assert any(method == 'GripperCtrl' for _, method, _ in f.commands)
+    assert f.manager.view()['collision_scope'] == 'none'
+    assert any(row['type'] == 'target' and row['geometry_scope'] == 'none'
+               for row in f.manager.trace.rows)
+
+
+@pytest.mark.parametrize('field,value', [('joints_rad', [float('nan')]*6),
+                                       ('joints_rad', [0.]*5),
+                                       ('position_m', [float('inf'), 0., 0.]),
+                                       ('rpy_deg', [0., 0.]), ('width_m', float('nan'))])
+def test_native_feedback_still_rejects_malformed_measurements(controller, field, value):
+    from astra_vla.workers.teleop import native_feedback
+    state = copy.deepcopy(controller.states['right'])
+    if field == 'joints_rad':
+        state[field] = value
+    elif field == 'width_m':
+        state['gripper'][field] = value
+    else:
+        state['ee_pose'][field] = value
+    with pytest.raises(ValueError, match='invalid native'):
+        native_feedback(state, {'scope': 'tcp_jog'})
+
+
 def test_native_unreachable_pose_pauses_input_without_ending_session_or_sending_bad_target(controller):
     from astra_vla.native_pose import NativePoseUnavailable
     f = controller
@@ -73,7 +127,7 @@ def test_native_backend_supports_both_arms_profiles_and_gripper_without_local_jo
     session = native_session(f, arm, profile)
     submit = f.robot.geometry_pool.submit
     def geometry_only(fn, *args):
-        assert fn.__name__ in ('geometry_hold', 'geometry_probe_ready', 'geometry_native_step')
+        assert fn.__name__ in ('native_feedback', 'geometry_probe_ready', 'geometry_native_step')
         return submit(fn, *args)
     f.robot.geometry_pool.submit = geometry_only
     f.manager.input({'session': session, 'sequence': 0, 'keys': ['space', 'q'],
@@ -82,6 +136,8 @@ def test_native_backend_supports_both_arms_profiles_and_gripper_without_local_jo
     view = f.manager.view()
     assert not view['native_pose_probe'] and view['execution_backend'] == 'controller_move_p'
     assert view['policy']['ik_solver'] == view['ik_solver'] == 'controller'
+    assert view['path_precheck'] == view['collision_scope'] == 'none'
+    assert f.manager.trace.context['path_precheck'] == f.manager.trace.context['collision_scope'] == 'none'
     assert view['speed_profile_active'] == profile and not view['detour']['enabled']
     assert set(a for a, _, _ in f.commands) == {arm}
     assert any(m == 'EndPoseCtrl' for _, m, _ in f.commands)

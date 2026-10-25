@@ -875,7 +875,7 @@ def test_backend_button_clears_keys_exits_control_and_selects_without_auto_open(
     window.draw()
     assert any('控制器原生' in text for text in texts)
     assert any('IK: controller' in text for text in texts)
-    assert any('仅当前自碰撞检查' in text for text in texts)
+    assert any('无本地自碰撞检查' in text for text in texts)
     for name, rect in window.hitboxes:
         if name == 'backend':
             assert window.screen.get_rect().contains(rect)

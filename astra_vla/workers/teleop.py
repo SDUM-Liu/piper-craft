@@ -115,10 +115,22 @@ def geometry_probe_ready():
 
 def geometry_native_step(state, geometry, proposal, limits, policy, allow_orientation):
     from astra_vla.native_pose import adapt_target
-    geometry_hold(state, geometry)
+    native_feedback(state, geometry)
     selected = Policy(**policy)
     return adapt_target(state, proposal, np.asarray(geometry['tcp']), limits, selected,
                         allow_orientation, budget_s=selected.geometry_timeout_s*.7)
+
+
+def native_feedback(state, geometry):
+    """Validate SDK feedback without querying URDF collision geometry."""
+    if geometry.get('scope') != 'tcp_jog':
+        raise ValueError('PIPER CRAFT native control requires robot-local TCP')
+    rows = (state['joints_rad'], state['ee_pose']['position_m'], state['ee_pose']['rpy_deg'])
+    if (any(np.asarray(row).shape != (size,) for row, size in zip(rows, (6, 3, 3))) or
+            not all(np.isfinite(row).all() for row in rows) or
+            not np.isfinite(state['gripper']['width_m'])):
+        raise ValueError('invalid native joint/pose/gripper feedback')
+    return True
 
 
 def geometry_hold(state, geometry=None, other_state=None):
@@ -363,11 +375,12 @@ class TeleopController(NativeProbe, DetourControl):
                     'vertical_frame': self.policy.vertical_frame if hasattr(self, 'policy') else None,
                     'ik_solver': ('joint_jog' if joint_jog else 'controller' if self.native_control else
                                   self.policy.ik_solver if hasattr(self, 'policy') else None),
-                    'path_precheck': 'measured_geometry_only' if self.native_control else 'full_joint_path',
+                    'path_precheck': 'none' if self.native_control else 'full_joint_path',
                     'follow_mode': self.policy.follow_mode if hasattr(self, 'policy') else None,
                     'sdk_speed_percent_effective': True if hasattr(self, 'policy') else None,
                     'mode_feedback_verified': False,
-                    'collision_scope': ('robot_only'), 'joint_position_limits': 'controller',
+                    'collision_scope': 'none' if self.native_control else 'robot_only',
+                    'joint_position_limits': 'controller',
                     'environment_guard': False, 'other_arm_guard': False,
                     'blocker': self.reason, 'termination_reason': getattr(self, 'termination_reason', None),
                     'sequence': getattr(self, 'sequence', -1),
@@ -526,7 +539,7 @@ class TeleopController(NativeProbe, DetourControl):
                         self.unverified_grippers[name] = width
                 if arm in self.unverified_grippers:
                     g['unverified_gripper_max_m'] = self.robot.config['limits']['maintenance_gripper_max_m'][arm]
-                # The native probe loads measured geometry without constructing local IK.
+                # Native control warms target feasibility without constructing local IK.
                 ready = geometry_probe_ready if self.native_control else geometry_ready
                 if self.robot.geometry_pool.submit(ready).result(timeout=15) is not True:
                     raise RuntimeError('teleop geometry worker not ready')
@@ -548,8 +561,8 @@ class TeleopController(NativeProbe, DetourControl):
                         self.native_limits = self.robot.read_controller_limits(arm)
                         controller_bounds(self.native_limits)
                         self.native_adjustment_deg = 0.
-                    if self.robot.geometry_pool.submit(geometry_hold, state, g).result(timeout=15) is not True:
-                        raise RuntimeError('native probe measured hold rejected')
+                    if self.robot.geometry_pool.submit(native_feedback, state, g).result(timeout=15) is not True:
+                        raise RuntimeError('native feedback validation rejected')
                 else:
                     state = self.prepare_local(arm)
                 if token != self.token_value():
@@ -598,8 +611,9 @@ class TeleopController(NativeProbe, DetourControl):
                         'automatic_orientation': bool(self.native_control and not self.native_pose_probe),
                         'controller_limits': ({key: self.native_limits[key] for key in ('source', 'complete', 'limits')}
                                               if self.native_control and not self.native_pose_probe else None),
-                        'path_precheck': 'measured_geometry_only' if self.native_control else 'full_joint_path',
-                        'collision_scope': ('robot_only'), 'joint_position_limits': 'controller',
+                        'path_precheck': 'none' if self.native_control else 'full_joint_path',
+                        'collision_scope': 'none' if self.native_control else 'robot_only',
+                        'joint_position_limits': 'controller',
                         'environment_guard': False, 'other_arm_guard': False,
                         'configuration_token': self.token}
                     pass
