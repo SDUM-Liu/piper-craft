@@ -45,6 +45,8 @@ def fresh_frame(frame, now=None):
 def control_message(message, telemetry=None):
     """Keep the measured cause visible when entry fails before a session exists."""
     message = str(message)
+    if message == 'teach/MIT/master-slave state requires manual mode handoff':
+        return '控制器处于示教、MIT或主从模式；点击现场确认可尝试退出示教，其他模式需人工交接'
     if 'teleop release displacement exceeds ' in message:
         telemetry = telemetry or {}
         actual = telemetry.get('release_extra_mm')
@@ -485,7 +487,7 @@ class Client:
             if any(not f.get('available') or time.time() - f.get('stamp', 0) > .6
                    for f in snapshot['cameras'].values()) or len(snapshot['cameras']) != 3:
                 raise RuntimeError('确认停止需要三路新鲜图像')
-            self.rpc(RUNTIME / 'robot.sock', 'acknowledge', {'manual_tcp': True}, timeout=5)
+            self.rpc(RUNTIME / 'robot.sock', 'acknowledge', {'manual_tcp': True}, timeout=12)
             self.error = ''
         elif action == 'retry_cameras':
             status = self.rpc(RUNTIME / 'robot.sock', 'status', timeout=1)
@@ -1426,7 +1428,7 @@ class Window:
                                         'color': {'info': (160, 220, 255), 'warning': (255, 220, 110),
                                                   'error': (255, 150, 150)}[message['level']]})
         stop_history = telemetry.get('phase') == 'stopped' and not robot.get('stopped') and not robot.get('fault')
-        blocker = error or (None if stop_history else telemetry.get('blocker'))
+        blocker = error or robot.get('fault') or (None if stop_history else telemetry.get('blocker'))
         current = {}
         if blocker:
             normal_exit = str(blocker) in ('desktop close', 'desktop control closed', 'desktop escape', 'desktop stop',

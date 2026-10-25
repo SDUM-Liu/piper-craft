@@ -340,6 +340,12 @@ class TeleopController(NativeProbe, DetourControl):
         return True
 
 
+    def scene_acknowledged(self):
+        """Retire an old entry rejection without creating a session or input."""
+        with self.mutex:
+            if not self.active and not self.owns_lock and self.phase == 'entry_blocked':
+                self.phase, self.reason = 'observing', None
+
     def view(self):
         with self.mutex:
             costs = list(self.cycles)

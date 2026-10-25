@@ -289,7 +289,8 @@ def test_acknowledged_normal_stop_history_does_not_look_like_current_entry_error
     window.client.robot['teleop'] = {'phase': 'stopped', 'blocker': 'old exit reason'}
     window.text = lambda value, *args, **kwargs: texts.append(str(value))
     window.draw()
-    assert any('old exit reason' in text for text in texts) == visible
+    assert any('fault' in text for text in texts) == visible
+    assert not any('old exit reason' in text for text in texts)
 
 
 def test_tab_speed_cycle_clears_held_motion_and_ignores_repeat():

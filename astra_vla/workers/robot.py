@@ -6,10 +6,11 @@ import sys
 import threading
 import time
 import multiprocessing
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 
 from piper_sdk import C_PiperInterface_V2
-from astra_vla.config import RUNTIME, settings
+from astra_vla.config import RUNTIME, atomic_json, settings
 from astra_vla.rpc import serve
 from astra_vla.kinematics import Kinematics
 from astra_vla.workers.feedback import CoherentArmFeedback
@@ -170,6 +171,7 @@ class Robot:
                 "stop_confirmed": bool(getattr(self, "stop_confirmation", None) and
                                        self.stop_confirmation["confirmed"]),
                 "stop_confirmation": getattr(self, "stop_confirmation", None),
+                "teach_exit": getattr(self, "teach_exit", None),
                 "last_rejection": getattr(self, "last_rejection", None),
                 "motion_control": {"controller": "controller_move_p" if native else "regularized_move_j",
                                    "ik_solver": "controller" if native else "casadi_ipopt",
@@ -444,27 +446,179 @@ class Robot:
         return state
 
 
-    def acknowledge(self, *, manual_tcp=False):
+    def exit_teach_mode(self, epoch):
+        """Explicit scene acknowledgement only: end teaching, never replay/reset/enable.
+
+        Called with the action lock held. Only the documented 0x150 end-record
+        byte is sent; firmware that keeps mode=2 must be recovered separately.
+        """
+        reference = {name: self.state(name) for name in self.arms}
+        affected = [name for name, state in reference.items() if state['controller']['ctrl_mode'] == 2]
+        if not affected:
+            return
+        report = {'state': 'exiting', 'arms': affected, 'attempts': dict.fromkeys(affected, 0),
+                  'before': reference, 'after': {}, 'error': '', 'command': 'MotionCtrl_1(0, 0, 2)',
+                  'reset_sent': False, 'motor_enable_sent': False, 'motion_target_sent': False}
+        path = RUNTIME.parent/'runs'/('teach_exit_'+uuid.uuid4().hex[:12])/'result.json'
+        report['evidence'] = str(path)
+        self.teach_exit = report
+        camera_identity = None
+
+        def guarded_feedback():
+            nonlocal camera_identity
+            with self.stop_state_lock:
+                if epoch != self.stop_epoch or self.stop_completed_epoch != epoch:
+                    raise RuntimeError('现场确认期间收到停止请求；已取消退出示教')
+            cameras = self.teleop.camera_read()['cameras']
+            if set(cameras) != {'top', 'left_wrist', 'right_wrist'}:
+                raise RuntimeError('退出示教需要三路新鲜 RGB')
+            for name, frame in cameras.items():
+                stamp, age = frame.get('stamp', 0), frame.get('age_s', float('inf'))
+                if (not frame.get('available') or not math.isfinite(stamp) or not math.isfinite(age) or
+                        not 0 <= time.time()-stamp <= .6 or not 0 <= age <= .6):
+                    raise RuntimeError(name+' RGB missing/stale during teach exit')
+            identity = {name: tuple(frame.get(k) for k in ('serial', 'width', 'height'))
+                        for name, frame in cameras.items()}
+            if camera_identity is not None and identity != camera_identity:
+                raise RuntimeError('退出示教期间相机配置变化')
+            camera_identity = identity
+            states = {name: self.state(name) for name in self.arms}
+            for name, state in states.items():
+                self.check_motion_state(state)
+                control = state['controller']
+                status_stamp = state.get('feedback_stamps', {}).get('status', 0)
+                if (not state.get('feedback_coherent', True) or
+                        not math.isfinite(status_stamp) or not 0 <= time.time()-status_stamp <= .3 or
+                        control['err_code'] or control['arm_status'] != 0 or state['gripper']['faults']):
+                    raise RuntimeError(name+' 示教退出需要新鲜且无故障的控制器反馈')
+                if control['ctrl_mode'] not in (0, 1, 2) or control['move_mode'] in (4, 5):
+                    raise RuntimeError(name+' 处于其他控制模式；现场确认不能自动接管')
+                message = self.arms[name].GetArmModeCtrl()
+                if getattr(message, 'Hz', 0) > 0 and enum(message.mode_ctrl.mit_mode) == 0xAD:
+                    raise RuntimeError(name+' 处于 MIT 高跟随模式；现场确认不能自动接管')
+                old = reference[name]
+                if (max(abs(a-b) for a, b in zip(state['joints_rad'], old['joints_rad'])) > math.radians(.15) or
+                        math.dist(state['ee_pose']['position_m'], old['ee_pose']['position_m']) > .0005 or
+                        rotation_distance_deg(state['ee_pose']['rpy_deg'], old['ee_pose']['rpy_deg']) > .2 or
+                        abs(state['gripper']['width_m']-old['gripper']['width_m']) > .0005 or
+                        state['gripper']['enabled'] != old['gripper']['enabled'] or
+                        control['motors_enabled'] != old['controller']['motors_enabled']):
+                    raise RuntimeError(name+' 退出示教期间姿态或使能状态变化；请重新观察')
+                if name not in affected and control['ctrl_mode'] != old['controller']['ctrl_mode']:
+                    raise RuntimeError(name+' 控制模式变化；已取消退出示教')
+            report['after'] = states
+            return states
+
+        with self.stop_state_lock:
+            if epoch != self.stop_epoch or self.stop_completed_epoch != epoch:
+                raise RuntimeError('现场确认期间收到停止请求；已取消退出示教')
+            self.stopped.set()
+            self.fault = '现场确认：正在退出示教模式'
+        try:
+            # Evidence creation and all-arm checks must succeed before the first SDK write.
+            atomic_json(path, report)
+            deadline = time.monotonic()+2.
+            stable_since, previous_stamps, next_send = None, {}, 0.
+            while time.monotonic() < deadline:
+                states = guarded_feedback()
+                stamps = {name: state['feedback_stamps']['status'] for name, state in states.items()}
+                advancing = all(stamp > previous_stamps.get(name, 0) for name, stamp in stamps.items())
+                previous_stamps = stamps
+                exited = all(states[name]['controller']['ctrl_mode'] in (0, 1) for name in affected)
+                if exited and advancing:
+                    stable_since = time.monotonic() if stable_since is None else stable_since
+                    if time.monotonic()-stable_since >= .2:
+                        confirmation = self.stationary_feedback(
+                            require_fault_free=True, reference_states=reference, joint_tolerance_deg=.15,
+                            feedback_check=guarded_feedback)
+                        if not confirmation['confirmed']:
+                            raise RuntimeError('退出示教后尚未确认静止：'+confirmation['reason'])
+                        final_states = guarded_feedback()
+                        if any(final_states[name]['controller']['ctrl_mode'] not in (0, 1) for name in affected):
+                            raise RuntimeError('退出示教后模式再次变化；请重新观察')
+                        with self.stop_state_lock:
+                            if epoch != self.stop_epoch:
+                                raise RuntimeError('现场确认期间收到停止请求；已取消退出示教')
+                            self.stop_confirmation = confirmation
+                        report['stop_confirmation'] = confirmation
+                        report['state'] = 'exited'
+                        return
+                else:
+                    stable_since = None
+                if not exited and time.monotonic() >= next_send:
+                    for name in affected:
+                        # Refresh both arms and RGB before each write, then serialize with stop.
+                        states = guarded_feedback()
+                        if time.monotonic() >= deadline:
+                            break
+                        if states[name]['controller']['ctrl_mode'] != 2:
+                            continue
+                        with self.tx_lock:
+                            with self.stop_state_lock:
+                                if epoch != self.stop_epoch or self.stop_completed_epoch != epoch:
+                                    raise RuntimeError('现场确认期间收到停止请求；已取消退出示教')
+                            report['attempts'][name] += 1
+                            self.arms[name].MotionCtrl_1(0x00, 0x00, 0x02)
+                    next_send = time.monotonic()+.2
+                time.sleep(.05)
+            raise RuntimeError('退出示教未确认：控制器仍为示教模式或模式反馈未稳定更新；'
+                               '本次未复位，请按有可靠支撑的人工恢复流程处理')
+        except Exception as exc:
+            report['state'], report['error'] = 'failed', str(exc)
+            with self.stop_state_lock:
+                owns_epoch = epoch == self.stop_epoch
+                if owns_epoch:
+                    self.fault = str(exc)
+                    self.stopped.set()
+            if owns_epoch and any(report['attempts'].values()):
+                # A failed mode transition must retain the ordinary pause/stop
+                # guard, even though this path never submits a motion target.
+                try:
+                    stopped = self.stop('现场确认退出示教失败：'+str(exc), manual_tcp=True)
+                    report['stop_confirmation'] = stopped.get('stop_confirmation')
+                except Exception as stop_error:
+                    report['stop_error'] = str(stop_error)
+            raise
+        finally:
+            atomic_json(path, report)
+
+    def acknowledge(self, *, manual_tcp=False, exit_teach=False):
         if not isinstance(manual_tcp, bool):
             raise ValueError('manual TCP flag must be boolean')
-        if self.lock.locked():
+        if not isinstance(exit_teach, bool):
+            raise ValueError('exit teach flag must be boolean')
+        if not self.lock.acquire(False):
             raise RuntimeError("previous command still running")
-        with self.stop_state_lock:
-            epoch = self.stop_epoch
-            if self.stop_completed_epoch != epoch:
-                raise RuntimeError("stop request still being sent or observed")
-        confirmation = (self.stationary_feedback(require_fault_free=True, joint_tolerance_deg=.15) if manual_tcp
-                        else self.stationary_feedback(require_fault_free=True))
-        with self.stop_state_lock:
-            if epoch != self.stop_epoch or self.stop_completed_epoch != epoch or self.lock.locked():
-                raise RuntimeError("new stop request or arm action during acknowledgement")
-            self.stop_confirmation = confirmation
-            if not confirmation["confirmed"]:
-                raise RuntimeError("fresh sustained stationary fault-free feedback required; stop unconfirmed: " +
-                                   confirmation["reason"])
-            # Does not resume or clear physical/controller faults. Explicit UI recovery only.
-            self.fault = None
-            self.stopped.clear()
+        try:
+            with self.stop_state_lock:
+                epoch = self.stop_epoch
+                if self.stop_completed_epoch != epoch:
+                    raise RuntimeError("stop request still being sent or observed")
+            def confirm_stationary():
+                confirmation = (self.stationary_feedback(require_fault_free=True, joint_tolerance_deg=.15)
+                                if manual_tcp else self.stationary_feedback(require_fault_free=True))
+                with self.stop_state_lock:
+                    if epoch != self.stop_epoch or self.stop_completed_epoch != epoch:
+                        raise RuntimeError("new stop request or arm action during acknowledgement")
+                    self.stop_confirmation = confirmation
+                    if not confirmation['confirmed']:
+                        raise RuntimeError('fresh sustained stationary fault-free feedback required; stop unconfirmed: '
+                                           +confirmation['reason'])
+                return confirmation
+            confirm_stationary()
+            if exit_teach:
+                self.exit_teach_mode(epoch)
+            with self.stop_state_lock:
+                if epoch != self.stop_epoch or self.stop_completed_epoch != epoch:
+                    raise RuntimeError("new stop request or arm action during acknowledgement")
+                # Never resumes a trajectory or clears physical/controller faults.
+                self.fault = None
+                self.stopped.clear()
+            acknowledged = getattr(getattr(self, 'teleop', None), 'scene_acknowledged', None)
+            if acknowledged:
+                acknowledged()
+        finally:
+            self.lock.release()
         return self.status()
 
 
@@ -516,7 +670,7 @@ class Robot:
         if method == 'stop':
             return self.stop(args.get('reason', 'operator stop'), manual_tcp=True)
         if method == 'acknowledge':
-            return self.acknowledge(manual_tcp=True)
+            return self.acknowledge(manual_tcp=True, exit_teach=True)
         if method == 'preflight':
             return {name: self.check_prepare(name) for name in args.get('arms', list(self.arms))}
         methods = {'teleop_open': self.teleop.open, 'teleop_input': self.teleop.input,

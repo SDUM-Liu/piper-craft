@@ -396,6 +396,143 @@ def test_acknowledge_rejects_single_fresh_frame_after_unconfirmed_stop(worker):
     assert not robot.stop_confirmation["confirmed"]
 
 
+@pytest.fixture
+def teaching_worker(worker, monkeypatch, tmp_path):
+    robot, state = worker
+    robot.lock = threading.Lock()
+    robot.stopped.set()
+    robot.fault = 'startup observation'
+    commands, modes = [], {'left': 2, 'right': 2}
+    after_send = [lambda name: modes.update({name: 0})]
+    read = robot.state
+    def feedback(name):
+        result = read(name)
+        result['controller']['ctrl_mode'] = modes[name]
+        return result
+    robot.state = feedback
+    def send(name, args):
+        commands.append((name, args))
+        after_send[0](name)
+    robot.arms = {name: SimpleNamespace(
+        MotionCtrl_1=lambda *args, name=name: send(name, args),
+        GetArmModeCtrl=lambda: SimpleNamespace(Hz=0)) for name in modes}
+    def camera_read():
+        stamp = read('left')['stamp']
+        return {'cameras': {name: dict(available=True, stamp=stamp, age_s=0, serial=name, width=640, height=480)
+                            for name in ('top', 'left_wrist', 'right_wrist')}}
+    robot.teleop = SimpleNamespace(session=None, active=False, owns_lock=False,
+                                   camera_read=camera_read, view=lambda: {'active': False})
+    monkeypatch.setitem(type(robot).acknowledge.__globals__, 'RUNTIME', tmp_path/'.runtime')
+    return robot, state, commands, modes, after_send
+
+
+@pytest.mark.parametrize('other_mode', [1, 2])
+def test_scene_acknowledgement_ends_only_teaching_without_targets_enable_or_reset(teaching_worker, other_mode):
+    robot, _, commands, modes, _ = teaching_worker
+    modes['right'] = other_mode
+    result = robot.dispatch('acknowledge', {})
+    assert commands == [('left', (0, 0, 2))]+([('right', (0, 0, 2))] if other_mode == 2 else [])
+    assert result['teach_exit']['state'] == 'exited'
+    assert result['stop_confirmed'] and not result['stopped'] and result['fault'] is None
+    assert not result['teleop']['active'] and not robot.lock.locked()
+    assert all(modes[name] in (0, 1) for name in modes)
+    import json
+    from pathlib import Path
+    evidence = json.loads(Path(result['teach_exit']['evidence']).read_text())
+    assert evidence['state'] == 'exited'
+    assert not any(evidence[key] for key in ('reset_sent', 'motor_enable_sent', 'motion_target_sent'))
+
+
+def test_scene_acknowledgement_retains_stop_when_firmware_does_not_exit(teaching_worker):
+    robot, _, commands, _, after_send = teaching_worker
+    after_send[0] = lambda _: None
+    with pytest.raises(RuntimeError, match='退出示教未确认'):
+        robot.dispatch('acknowledge', {})
+    assert 4 <= len(commands) <= 22
+    assert all(args == (0, 0, 2) for _, args in commands[:-2])
+    assert commands[-2:] == [('left', (0, 1, 0)), ('right', (0, 1, 0))]
+    assert robot.stopped.is_set() and robot.teach_exit['state'] == 'failed'
+    assert not robot.lock.locked()
+
+
+@pytest.mark.parametrize('failure', ['rgb', 'feedback', 'fault', 'joint', 'gripper', 'enable', 'mit', 'stop'])
+def test_teach_exit_checks_both_arms_and_cancels_before_second_write(teaching_worker, failure):
+    robot, state, commands, _, after_send = teaching_worker
+    def interrupt(_):
+        if failure == 'rgb':
+            robot.teleop.camera_read = lambda: {'cameras': {}}
+        elif failure == 'feedback':
+            state['age_s'] = 1.
+        elif failure == 'fault':
+            state['controller']['err_code'] = 63
+        elif failure == 'joint':
+            state['joints_rad'][0] += math.radians(1)
+        elif failure == 'gripper':
+            state['gripper']['width_m'] += .003
+        elif failure == 'enable':
+            state['controller']['motors_enabled'] = [False]*6
+        elif failure == 'mit':
+            robot.arms['right'].GetArmModeCtrl = lambda: SimpleNamespace(
+                Hz=200, mode_ctrl=SimpleNamespace(mit_mode=0xAD))
+        else:
+            robot.stop_epoch += 1
+            robot.stop_completed_epoch = robot.stop_epoch
+            robot.fault = 'new stop'
+    after_send[0] = interrupt
+    with pytest.raises(RuntimeError):
+        robot.dispatch('acknowledge', {})
+    assert commands == [('left', (0, 0, 2))]+(
+        [] if failure == 'stop' else [('left', (0, 1, 0)), ('right', (0, 1, 0))])
+    assert robot.stopped.is_set() and robot.teach_exit['state'] == 'failed'
+    if failure == 'stop':
+        assert robot.fault == 'new stop'
+
+
+@pytest.mark.parametrize('failure', ['rgb', 'other_mode', 'mit', 'moving', 'evidence'])
+def test_teach_exit_refuses_unsafe_initial_conditions_before_any_write(teaching_worker, monkeypatch, failure):
+    robot, state, commands, modes, _ = teaching_worker
+    if failure == 'rgb':
+        robot.teleop.camera_read = lambda: {'cameras': {}}
+    elif failure == 'other_mode':
+        modes['right'] = 4
+    elif failure == 'mit':
+        robot.arms['right'].GetArmModeCtrl = lambda: SimpleNamespace(
+            Hz=200, mode_ctrl=SimpleNamespace(mit_mode=0xAD))
+    elif failure == 'moving':
+        read = robot.state
+        def moving(name):
+            state['joints_rad'][0] += .01
+            return read(name)
+        robot.state = moving
+    else:
+        def failed(*_):
+            raise OSError('evidence disk full')
+        monkeypatch.setitem(type(robot).acknowledge.__globals__, 'atomic_json', failed)
+    with pytest.raises((RuntimeError, OSError)):
+        robot.dispatch('acknowledge', {})
+    assert not commands
+    assert robot.stopped.is_set()
+
+
+def test_legacy_acknowledgement_does_not_attempt_teach_exit(teaching_worker):
+    robot, _, commands, modes, _ = teaching_worker
+    robot.acknowledge()
+    assert not commands and modes == {'left': 2, 'right': 2}
+
+
+def test_teach_exit_sdk_exception_still_requests_stop_for_both_arms(teaching_worker):
+    robot, _, commands, _, _ = teaching_worker
+    def failing(*args):
+        commands.append(('left', args))
+        if args == (0, 0, 2):
+            raise OSError('CAN send failed')
+    robot.arms['left'].MotionCtrl_1 = failing
+    with pytest.raises(OSError, match='CAN send failed'):
+        robot.dispatch('acknowledge', {})
+    assert commands == [('left', (0, 0, 2)), ('left', (0, 1, 0)), ('right', (0, 1, 0))]
+    assert robot.stopped.is_set() and not robot.lock.locked()
+
+
 @pytest.mark.parametrize('width,enabled,accepted', [(-.0021, False, True), (-.0037, False, True),
     (-.0021, True, False), (-.066, False, False), (.066, False, False), (float('nan'), False, False)])
 def test_only_manual_arm_preparation_can_quarantine_disabled_negative_gripper(worker, width, enabled, accepted):

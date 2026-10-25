@@ -16,6 +16,23 @@ regularized_controller = teleop_fixtures.regularized_controller
 enter = teleop_fixtures.enter
 
 
+def test_scene_acknowledgement_clears_old_entry_blocker_without_opening_control(regularized_controller):
+    f = regularized_controller
+    f.manager.phase, f.manager.reason = 'entry_blocked', 'teach/MIT/master-slave state requires manual mode handoff'
+    f.manager.scene_acknowledged()
+    assert f.manager.phase == 'observing' and f.manager.reason is None
+    assert not f.manager.active and not f.manager.owns_lock and f.manager.session is None
+    assert not f.commands
+
+
+def test_scene_acknowledgement_does_not_alter_an_active_session(regularized_controller):
+    f = regularized_controller
+    session = enter(f)
+    phase = f.manager.phase
+    f.manager.scene_acknowledged()
+    assert f.manager.active and f.manager.session == session and f.manager.phase == phase
+
+
 @pytest.mark.parametrize('confirmed', [False, True])
 def test_expired_input_keeps_first_stop_cause_across_cleanup(controller, confirmed):
     f = controller
