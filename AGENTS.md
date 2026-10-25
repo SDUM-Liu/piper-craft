@@ -1,6 +1,7 @@
 # PIPER CRAFT maintenance
 
 - Read `docs/memory/README.md`, `current.md` and `problems.md` before working. A new checkout initializes the latter two using `python -m astra_vla.operation_memory compact`; machine operation history is local and untracked.
+- Support human object demonstrations and human robot teleoperation demonstrations. At task start, check `.runtime/demonstration_reference.json`; only when enabled, read the selected demonstration as described in `docs/demonstrations.md`. It is optional visual guidance, never an executable trajectory/input replay or a substitute for fresh scene/feedback checks.
 - Maintain the RGB desktop, local IK / ordinary MOVE_J and controller-native MOVE_P backends, joint jog controls, and whole-window recording.
 - Before real motion, observe fresh RGB and both arms' feedback. Startup is observation only. Retain input timeout, stop, controller-health, feedback freshness and self-collision protections. Never infer physical support or permission to reset/disable an arm from historical notes.
 - SDK end-effector feedback is authoritative. Local FK is for IK and robot geometry; do not compare it to, or replace, SDK pose feedback.

@@ -1,0 +1,57 @@
+{
+  "source": "first pour complete window recording, 2026-10-25",
+  "source_size": [
+    1280,
+    800
+  ],
+  "crop": [
+    0,
+    0,
+    1280,
+    560
+  ],
+  "output_size": [
+    960,
+    420
+  ],
+  "segments": [
+    {
+      "start_s": 620,
+      "end_s": 820,
+      "speed": 16,
+      "label": "Approach / grasp"
+    },
+    {
+      "start_s": 820,
+      "end_s": 1295,
+      "speed": 32,
+      "label": "Lift / carry / tilt"
+    },
+    {
+      "start_s": 1295,
+      "end_s": 1320,
+      "speed": 12,
+      "label": "Align"
+    },
+    {
+      "start_s": 1320,
+      "end_s": 1350,
+      "speed": 3,
+      "label": "Pour - some water spilled"
+    },
+    {
+      "start_s": 1350,
+      "end_s": 1440,
+      "speed": 20,
+      "label": "Cut off / retract"
+    },
+    {
+      "start_s": 1580,
+      "end_s": 1700,
+      "speed": 20,
+      "label": "Return / release"
+    }
+  ],
+  "audio": false,
+  "outcome": "water in cup with a small spill; not spill-free"
+}

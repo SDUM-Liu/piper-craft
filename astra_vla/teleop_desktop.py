@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 from collections import deque
 from dataclasses import asdict, replace
 from datetime import datetime
 import io
+import json
 import math
 import os
 from pathlib import Path
@@ -27,6 +29,7 @@ from astra_vla.rpc import call
 from astra_vla.teleop import BACKEND_LABELS, EXECUTION_BACKENDS, JOINT_KEYS, KEYS, SPEED_PROFILES, Integrator, Policy, pose
 from astra_vla.teleop_preferences import BINDING_HELP, DEFAULT_BINDINGS, DesktopPreferences
 from astra_vla.window_recording import WindowRecording
+from astra_vla.demonstrations import DemonstrationRecording, available, select_reference
 
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 
@@ -711,6 +714,13 @@ class Window:
         self.recording = WindowRecording()
         self.recording_seen = 'idle'
         self.recording_notice = ''
+        self.demonstration = DemonstrationRecording(ROOT/'runs/offline_demonstrations' if demo else None)
+        self.demonstration_mode = 'human_objects'
+        self.demonstration_notice = ''
+        self.demonstration_candidates = []
+        self.demonstration_index = 0
+        self.demonstration_reference = ''
+        self.demonstration_seen = 'idle'
         self.set_topmost(pin)
         if self.preferences.fullscreen:
             self.toggle_fullscreen()
@@ -820,6 +830,64 @@ class Window:
         self.publish_intent()
 
     def activate(self, name):
+        if name == 'open' and self.demonstration.status()['state'] in ('recording', 'finalizing') and (
+                self.demonstration.mode == 'human_objects'):
+            self.demonstration_notice = '请先结束亲手操作示范，再进入机械臂控制'
+            return
+        if name.startswith('demonstration'):
+            self.controls.blur()
+            self.publish_intent()
+            try:
+                if self.demo and name in ('demonstration_select', 'demonstration_clear'):
+                    raise ValueError('离线演示不能修改真实示范参考')
+                if name == 'demonstrations':
+                    self.menu_open, self.menu_page = True, 'demonstrations'
+                    self.demonstration_candidates = available(self.demonstration.destination)
+                    self.demonstration_index = 0
+                    reference = RUNTIME/'demonstration_reference.json'
+                    data = json.loads(reference.read_text()) if not self.demo and reference.exists() else {}
+                    self.demonstration_reference = Path(data['directory']).name if data.get('enabled') else '关闭'
+                elif name == 'demonstration_mode':
+                    if self.demonstration.status()['state'] not in ('recording', 'finalizing'):
+                        self.demonstration_mode = ('human_teleop' if self.demonstration_mode == 'human_objects'
+                                                   else 'human_objects')
+                elif name == 'demonstration_record':
+                    if self.demonstration.status()['state'] == 'recording':
+                        self.demonstration.stop()
+                    elif self.demonstration.status()['state'] != 'finalizing':
+                        if self.demonstration_mode == 'human_objects' and (
+                                self.client.session or self.client.opening or
+                                self.client.robot.get('teleop', {}).get('active') or
+                                self.client.robot.get('busy')):
+                            raise ValueError('请先退出控制并确认静止，再录亲手操作示范')
+                        if self.demonstration_mode == 'human_objects' and not self.demo and (
+                                not self.client.robot.get('stop_confirmed') or
+                                not all(fresh_frame(self.client.robot.get('arms', {}).get(arm, {}))
+                                        for arm in ('left', 'right'))):
+                            raise ValueError('亲手示范需要新鲜双臂反馈和停止确认')
+                        if not all(fresh_frame(self.client.frames.get(camera, {})) for camera in
+                                   ('top', 'left_wrist', 'right_wrist')):
+                            raise ValueError('开始示范需要全部三路新鲜 RGB')
+                        self.demonstration.start(self.demonstration_mode, simulated=self.demo)
+                        self.demonstration_notice = '录制中；返回画面后示范，再到此处结束保存'
+                elif name == 'demonstration_next':
+                    self.demonstration_candidates = available(self.demonstration.destination)
+                    self.demonstration_index += 1
+                elif name == 'demonstration_select':
+                    paths = self.demonstration_candidates
+                    if not paths:
+                        raise ValueError('暂无完整保存的真实示范')
+                    path = paths[self.demonstration_index % len(paths)]
+                    select_reference(path)
+                    self.demonstration_reference = path.name
+                    self.demonstration_notice = 'Codex 参考已启用：'+path.name
+                elif name == 'demonstration_clear':
+                    select_reference()
+                    self.demonstration_reference = '关闭'
+                    self.demonstration_notice = 'Codex 示范参考已关闭'
+            except Exception as exc:
+                self.demonstration_notice = str(exc)
+            return
         if name in JOINT_KEYS:
             self.controls.blur()
             active = self.client.robot.get('teleop', {}).get('active', False)
@@ -1044,6 +1112,9 @@ class Window:
         elapsed = int(recording['elapsed_s'])
         record_label = {'recording': f'● 停止录像 {elapsed//60:02}:{elapsed%60:02}',
                         'finalizing': '录像保存中…'}.get(recording['state'], '● 录制完整窗口')
+        demonstration = self.demonstration.status()
+        demonstration_label = {'recording': '● 示范录制中 / 结束', 'finalizing': '示范保存中…'}.get(
+            demonstration['state'], '人类示范 / Codex 参考')
         backend_label = ('确认停止后切换…' if self.client.pending_backend else
                          '方案：'+BACKEND_LABELS[self.client.execution_backend])
         rows = [(('left', self.key_label('1')+' 左臂'), ('right', self.key_label('2')+' 右臂')),
@@ -1051,6 +1122,7 @@ class Window:
                 (('backend', backend_label),),
                 (('speed', self.key_label('tab')+' 档位：'+profile),),
                 (('record_window', record_label),),
+                (('demonstrations', demonstration_label),),
                 (('retry_cameras', '恢复相机'), ('menu', 'Esc 菜单'))]
         for items in rows:
             size = (width-6*(len(items)-1))//len(items)
@@ -1060,6 +1132,8 @@ class Window:
                 if name == self.controls.arm:
                     pg.draw.rect(self.screen, (247, 247, 228), rect, 2)
                 if name == 'record_window' and recording['state'] == 'recording':
+                    pg.draw.rect(self.screen, (235, 80, 70), rect, 2)
+                if name == 'demonstrations' and demonstration['state'] == 'recording':
                     pg.draw.rect(self.screen, (235, 80, 70), rect, 2)
             y += 31
         if self.client.execution_backend == 'controller_move_p':
@@ -1135,7 +1209,10 @@ class Window:
         width, height = self.screen.get_size()
         self.shade(pg.Rect(0, 0, width, height), 115)
         if self.menu_page != 'main':
-            self.draw_settings()
+            if self.menu_page == 'demonstrations':
+                self.draw_demonstrations()
+            else:
+                self.draw_settings()
             return
         rect = pg.Rect(width//2-230, (height-500)//2, 460, 500)
         self.text('准备中…' if opening else '遥操作菜单', (rect.x+147, rect.y+4), font=self.menu_font)
@@ -1148,14 +1225,67 @@ class Window:
                  ('topmost', self.key_label('f8')+' 置顶：'+('开' if self.always_on_top else '关'))),
                 (('fullscreen', self.key_label('f11')+' 全屏：'+('开' if self.fullscreen else '关')),
                  ('debug', self.key_label('f3')+' 调试：'+('开' if self.show_debug else '关'))),
-                (('keys', '按键说明 / 修改'), ('defaults', '启动默认设置')),
+                (('keys', '按键 / 设置'), ('demonstrations', '人类示范 / 参考')),
+                (('defaults', '启动默认设置'),),
                 (('stop', 'F9 · 请求停止'),)]
         for row, items in enumerate(rows):
             size = (rect.width-10*(len(items)-1))//len(items)
             for col, (name, label) in enumerate(items):
-                self.button(name, label, pg.Rect(rect.x+col*(size+10), rect.y+52+row*48, size, 40))
+                self.button(name, label, pg.Rect(rect.x+col*(size+10), rect.y+48+row*43, size, 36))
         self.text('Esc 菜单 · F9 请求停止 · '+self.key_label('tab')+' 切档', (rect.x+65, rect.y+451), font=self.small)
         self.text('启动只观察 · 菜单打开时暂停按键输入', (rect.x+60, rect.y+476), font=self.small)
+
+    def draw_demonstrations(self):
+        pg = self.pg
+        width, height = self.screen.get_size()
+        rect = pg.Rect(width//2-310, max(8, (height-440)//2), 620, 440)
+        self.shade(rect, 235)
+        status = self.demonstration.status()
+        mode = '亲手操作物体' if self.demonstration_mode == 'human_objects' else '遥控机械臂示教'
+        self.text('人类动作示范 · 可选 Codex 参考', (rect.x+18, rect.y+12), font=self.menu_font)
+        rows = [('demonstration_mode', '类型：'+mode),
+                ('demonstration_record', '结束并保存示范' if status['state'] == 'recording' else
+                 ('示范保存中…' if status['state'] == 'finalizing' else '开始录制三路 RGB / 反馈')),
+                ('resume_view', '返回实时画面 / 继续示教'),
+                ('demonstration_next', '浏览已保存示范（下一条）'),
+                ('demonstration_select', '将当前示范选为 Codex 参考'),
+                ('demonstration_clear', '关闭 Codex 示范参考'),
+                ('settings_back', '返回菜单')]
+        for index, (name, label) in enumerate(rows):
+            self.button(name, label, pg.Rect(rect.x+18, rect.y+56+index*37, rect.width-36, 31))
+        paths = self.demonstration_candidates
+        current = paths[self.demonstration_index % len(paths)].name if paths else '暂无已保存真实示范'
+        state_label = {'idle': '尚未开始录制', 'recording': '录制中', 'finalizing': '保存中',
+                       'saved': '已保存', 'error': '录制失败'}[status['state']]
+        lines = [current, status['error'] or self.demonstration_notice or state_label,
+                 '亲手示范须先退出控制并确认静止；不会自动失能。',
+                 '当前参考：'+self.demonstration_reference]
+        for index, line in enumerate(lines):
+            self.text(line[:65], (rect.x+18, rect.y+325+index*24), font=self.small)
+
+    def capture_demonstration(self):
+        recorder = self.demonstration
+        if not recorder.due():
+            return
+        with self.client.lock:
+            robot = self.client.robot
+            if recorder.mode == 'human_objects' and (self.client.session or self.client.opening or
+                                                     robot.get('teleop', {}).get('active') or robot.get('busy')):
+                recorder.stop('亲手示范期间检测到控制会话，已结束录制')
+                return
+            cameras = {}
+            for name, frame in self.client.frames.items():
+                if fresh_frame(frame):
+                    surface = frame['surface']
+                    cameras[name] = (frame['stamp'], surface.get_size(), self.pg.image.tobytes(surface, 'RGB'))
+            context = dict(arms=copy.deepcopy(robot.get('arms', {})), teleop=copy.deepcopy(robot.get('teleop', {})),
+                           requested_keys=sorted(self.controls.keys), sent_keys=list(getattr(self.client, 'keys', [])),
+                           selected_arm=self.controls.arm, backend=self.client.execution_backend,
+                           speed_profile=self.controls.speed_profile, focused=self.focused,
+                           menu_open=self.menu_open, robot_error=self.client.error,
+                           stop_confirmed=robot.get('stop_confirmed'), fault=robot.get('fault'),
+                           feedback_note='SDK snapshot; input queues do not prove command execution')
+        recorder.submit(cameras, context)
 
     def draw_settings(self):
         pg = self.pg
@@ -1415,6 +1545,14 @@ class Window:
                                   'color': (180, 240, 170)})
         if self.recording.due():
             self.recording.submit(pg.image.tobytes(self.screen, 'RGB'), self.screen.get_size())
+        self.capture_demonstration()
+        status = self.demonstration.status()
+        if status['state'] != self.demonstration_seen:
+            self.demonstration_seen = status['state']
+            if status['state'] == 'saved':
+                self.demonstration_notice = '示范已保存：'+Path(status['path']).name
+                self.demonstration_candidates = available(self.demonstration.destination)
+                self.demonstration_index = 0
         pg.display.flip()
 
 def main():
@@ -1466,7 +1604,10 @@ def main():
             client.shutdown()
         finally:
             try:
-                window.recording.close()
+                try:
+                    window.recording.close()
+                finally:
+                    window.demonstration.close()
             finally:
                 pygame.quit()
                 for sig, handler in old_signals.items():

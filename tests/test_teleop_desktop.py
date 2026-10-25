@@ -23,6 +23,7 @@ def window():
     result = Window(DemoClient(), demo=True)
     yield result
     result.recording.close()
+    result.demonstration.close()
     pg.quit()
 
 
@@ -415,7 +416,8 @@ def test_controls_are_below_minimap_and_menu_actions_stay_in_menu(window, size):
     window.menu_open = False
     window.draw()
     from astra_vla.teleop import JOINT_KEYS
-    assert set(window.buttons) == {'left', 'right', 'open', 'acknowledge', 'backend', 'speed', 'record_window', 'retry_cameras', 'menu'} | JOINT_KEYS
+    assert set(window.buttons) == {'left', 'right', 'open', 'acknowledge', 'backend', 'speed', 'record_window',
+                                   'demonstrations', 'retry_cameras', 'menu'} | JOINT_KEYS
     assert all(window.sidebar_rect.contains(rect) and rect.top > window.minimap_rect.bottom
                for rect in [*window.buttons.values(), *window.key_rects.values()])
     assert all(not rect.colliderect(window.main_image_rect)
@@ -440,6 +442,72 @@ def test_hiding_hud_keeps_errors_and_stop_confirmation_visible(window):
     assert any('[控制] 无法执行：actual controller fault' in text for text in texts)
     assert any('尚未确认静止' in t for t in texts)
     assert any('OFFLINE DEMO' in t for t in texts)
+
+
+def test_human_objects_recording_blocks_control_and_requires_fresh_views(window, tmp_path):
+    window.demonstration.destination = tmp_path
+    window.activate('demonstrations')
+    window.client.frames.pop('top')
+    window.activate('demonstration_record')
+    assert window.demonstration.status()['state'] == 'idle'
+    assert '三路' in window.demonstration_notice
+    window.client.frames['top'] = window.client.frames['left_wrist']
+    window.activate('demonstration_record')
+    assert window.demonstration.status()['state'] == 'recording'
+    window.activate('open')
+    assert window.client.session is None
+    assert '先结束' in window.demonstration_notice
+    window.draw()
+    window.demonstration.close()
+    assert window.demonstration.status()['state'] == 'saved'
+    window.activate('demonstrations')
+    assert not window.demonstration_candidates  # simulated evidence is never a real reference
+
+
+def test_teleop_demonstration_allows_explicit_control_entry_and_keeps_feedback(window, tmp_path):
+    window.demonstration.destination = tmp_path
+    window.activate('demonstration_mode')
+    window.activate('demonstration_record')
+    window.activate('open')
+    assert window.client.session
+    window.menu_open = False
+    window.controls.press('w')
+    window.draw()
+    window.demonstration.close()
+    import json
+    trace = json.loads((window.demonstration.path/'samples.jsonl').read_text().splitlines()[0])
+    assert trace['context']['requested_keys'] == ['w']
+    assert set(trace['context']['arms']) == {'left', 'right'}
+
+
+def test_object_demo_needs_stop_and_fresh_feedback_and_aborts_external_control(window, tmp_path):
+    window.demo = False  # Still uses DemoClient: no real workers or motion.
+    window.demonstration.destination = tmp_path
+    window.activate('demonstration_record')
+    assert window.demonstration.status()['state'] == 'idle'
+    assert '停止确认' in window.demonstration_notice
+    window.client.robot['stop_confirmed'] = True
+    window.activate('demonstration_record')
+    assert window.demonstration.status()['state'] == 'idle'  # no arm timestamps
+    for arm in window.client.robot['arms'].values():
+        arm['stamp'], arm['age_s'] = time.time(), 0.
+    window.activate('demonstration_record')
+    assert window.demonstration.status()['state'] == 'recording'
+    window.client.robot['teleop']['active'] = True
+    window.capture_demonstration()
+    window.demonstration.close()
+    assert window.demonstration.status()['state'] == 'error'
+    assert '控制会话' in window.demonstration.status()['error']
+
+
+def test_offline_demonstration_never_changes_real_reference(window, monkeypatch):
+    from astra_vla import teleop_desktop
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('offline demo wrote real reference')
+    monkeypatch.setattr(teleop_desktop, 'select_reference', forbidden)
+    for action in ('demonstration_select', 'demonstration_clear'):
+        window.activate(action)
+        assert '离线演示不能修改' in window.demonstration_notice
 
 
 def test_f3_shows_original_cause_trace_and_displacement_without_limit(window):

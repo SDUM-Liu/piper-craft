@@ -1,7 +1,7 @@
 [project]
 name = "piper-craft"
 version = "0.2.0"
-description = "RGB desktop teleoperation with regularized MOVE_J and bounded operation memory"
+description = "RGB desktop teleoperation, optional human demonstrations and bounded operation memory"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = [
@@ -22,6 +22,7 @@ piper-craft = "astra_vla.launcher:main"
 piper-craft-desktop = "astra_vla.teleop_desktop:main"
 piper-craft-message = "astra_vla.codex_messages:main"
 piper-craft-memory = "astra_vla.operation_memory:main"
+piper-craft-demonstrations = "astra_vla.demonstrations:main"
 
 [build-system]
 requires = ["hatchling"]
