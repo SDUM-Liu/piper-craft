@@ -857,6 +857,34 @@ def test_demo_explicit_codex_path_uses_only_temporary_source(window, tmp_path):
     assert other.codex_messages.poll() == [] and not path.exists()
 
 
+def test_held_step_readback_appears_in_command_chat_and_updates_once(window):
+    from astra_vla.step_feedback import KeyStepFeedback
+    from test_teleop import state
+    recorder = KeyStepFeedback('synthetic', 'right')
+    now = time.time()
+    recorder.change(['w', 'q'], 1., now-.1)
+    recorder.sent(['w', 'q'])
+    recorder.change([], 2., now)
+    measured = state()
+    measured['stamp'] = now
+    measured['joints_rad'] = np.deg2rad([1,2,3,4,5,6]).tolist()
+    measured['gripper'].update(width_m=.0432, effort=-.2)
+    recorder.capture(measured, settled=False, stamp=now)
+    window.menu_open = False
+    window.client.robot['teleop']['step_feedback'] = recorder.view()
+    texts = []
+    draw_text = window.text
+    window.text = lambda text, *a, **kw: (texts.append(str(text)), draw_text(text, *a, **kw))[1]
+    window.draw()
+    assert any('动作反馈' in text for text in texts)
+    assert 'J6=+6.00°' in ''.join(texts) and '43.20mm' in ''.join(texts)
+    recorder.capture(measured, settled=True, stamp=now)
+    window.client.robot['teleop']['step_feedback'] = recorder.view()
+    window.draw()
+    window.draw()
+    assert len(window.step_chat) == 1 and '静止已确认' in next(iter(window.step_chat.values()))['text']
+
+
 @pytest.mark.parametrize('size', [(1280, 800), (1100, 700)])
 def test_backend_button_clears_keys_exits_control_and_selects_without_auto_open(window, size):
     window.screen = pg.display.set_mode(size)

@@ -20,6 +20,7 @@ from astra_vla.teleop import Integrator, JOINT_KEYS, Policy, SPEED_PROFILES, key
 from astra_vla.teleop_detour import DetourPolicy
 from astra_vla.workers.detour_control import DetourControl
 from astra_vla.workers.native_probe import NativeProbe
+from astra_vla.step_feedback import KeyStepFeedback
 
 
 _geometry_model = None
@@ -306,6 +307,7 @@ class TeleopController(NativeProbe, DetourControl):
         self.native_control = False
         self.execution_backend = 'regularized_move_j'
         self.recovery = None
+        self.key_feedback = KeyStepFeedback()
         self.detour_policy = DetourPolicy.load()
         self.reset_detour()
 
@@ -385,6 +387,7 @@ class TeleopController(NativeProbe, DetourControl):
                     'blocker': self.reason, 'termination_reason': getattr(self, 'termination_reason', None),
                     'sequence': getattr(self, 'sequence', -1),
                     'input_keys': sorted(getattr(self, 'keys', ())),
+                    'step_feedback': self.key_feedback.view(),
                     'motion_speed_fraction': (self.integrator.speed_fraction
                                               if self.active and hasattr(self, 'integrator') else 0.),
                     'stop_confirmed': bool(self.last_confirmation and self.last_confirmation['confirmed']),
@@ -582,6 +585,7 @@ class TeleopController(NativeProbe, DetourControl):
                         self.begin_native_probe(state)
                     self.maximum_width = self.robot.config['limits']['maintenance_gripper_max_m'][arm]
                     self.session = uuid.uuid4().hex
+                    self.key_feedback = KeyStepFeedback(self.session, arm, self.key_feedback.view())
                     self.keys, self.accepted_keys = frozenset(), frozenset()
                     self.detour_policy = DetourPolicy.load()
                     self.reset_detour()
@@ -702,6 +706,8 @@ class TeleopController(NativeProbe, DetourControl):
                 self.waiting_since = None
                 self.reset_detour()
             self.keys = keys
+            ended_step = self.key_feedback.change(keys, self.clock.monotonic(), self.clock.time(),
+                                                  'speed changed' if changing_profile else 'keys changed')
             generation = self.generation
             self.trace.record('input', sequence=sequence, keys=sorted(keys), generation=generation,
                               speed_profile=self.requested_speed_profile)
@@ -711,9 +717,27 @@ class TeleopController(NativeProbe, DetourControl):
                         ((positive in keys) == (negative in keys)) for positive, negative in pairs)
         if previous - keys or cancelled or changing_profile or route_changed:
             self.pause(generation)
+        if ended_step:
+            self.capture_key_feedback()
         if keys and not previous:
             self.input_changed.set()
         return {'accepted': True, 'sequence': sequence}
+
+    def capture_key_feedback(self, state=None, *, settled=False):
+        """Diagnostic readback must never delay or replace pause/stop protection."""
+        with self.mutex:
+            if not any(not row['settled'] for row in self.key_feedback.reports):
+                return
+            try:
+                measured = state if state is not None else self.robot.state(self.arm)
+            except Exception:
+                measured = {}
+            rows = self.key_feedback.capture(measured, settled=settled, stamp=self.clock.time())
+            for row in rows:
+                try:
+                    self.trace.record('key_step_feedback', report=row)
+                except Exception:
+                    pass  # Readback display cannot prevent a stop.
 
     def pause(self, generation):
         with self.robot.tx_lock, self.mutex:
@@ -773,6 +797,7 @@ class TeleopController(NativeProbe, DetourControl):
             if first:
                 self.termination_reason = reason
             self.active = False
+            self.key_feedback.change([], self.clock.monotonic(), self.clock.time(), self.termination_reason)
             self.generation = getattr(self, 'generation', 0) + 1
             self.keys = frozenset()
             self.phase, self.reason = 'stopping', self.termination_reason
@@ -799,6 +824,7 @@ class TeleopController(NativeProbe, DetourControl):
         for child in (thread, self.guard_thread, self.camera_thread):
             if child and child is not threading.current_thread():
                 child.join(timeout=.5)
+        self.capture_key_feedback(settled=bool(confirmation['confirmed']))
         if not thread or not thread.is_alive() or thread is threading.current_thread():
             if confirmation['confirmed']:
                 with self.open_lock:
@@ -987,6 +1013,7 @@ class TeleopController(NativeProbe, DetourControl):
                     self.integrator.rotating = True
                 self.phase = 'ready'
                 self.last_confirmation = {'confirmed': True}
+                self.capture_key_feedback(state, settled=True)
         if not keys:
             return
         if self.blocked_generation == generation:
@@ -1319,6 +1346,7 @@ class TeleopController(NativeProbe, DetourControl):
             self.deadline_misses = 0
             self.waiting_since = None
             self.accepted_keys = keys
+            self.key_feedback.sent(keys)
             self.velocity = result['velocity']
             self.last_goal_joints = np.deg2rad(np.asarray(target, dtype=float) / 1000).tolist()
             self.paused, self.phase, self.last_confirmation = False, 'moving', None

@@ -52,6 +52,8 @@ def render(directory, state):
         problems += ['']
     (directory/'current.md').write_text('\n'.join(current)+'\n')
     (directory/'problems.md').write_text('\n'.join(problems)+'\n')
+    from astra_vla.task_memory import TaskMemory
+    TaskMemory(directory, root=ROOT).compact()
     check(directory)
 
 
@@ -133,6 +135,10 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('check')
     sub.add_parser('compact')
+    planning = sub.add_parser('planning-context')
+    planning.add_argument('--instruction', required=True)
+    planning.add_argument('--scene-id', default='')
+    planning.add_argument('--demo-offset', type=int, default=0)
     context = sub.add_parser('context')
     context.add_argument('--observed', required=True)
     context.add_argument('--evidence', default='')
@@ -145,7 +151,10 @@ def main():
         record.add_argument('--'+field, default='')
     record.add_argument('--status', default='open', choices=['open','software_verified','hardware_verified','resolved'])
     args = parser.parse_args()
-    if args.command == 'check':
+    if args.command == 'planning-context':
+        from astra_vla.task_memory import TaskMemory
+        print(json.dumps(TaskMemory(args.directory).context(args.instruction, args.scene_id, args.demo_offset), ensure_ascii=False))
+    elif args.command == 'check':
         print(json.dumps(check(args.directory), ensure_ascii=False))
     elif args.command == 'compact':
         with edit(args.directory):

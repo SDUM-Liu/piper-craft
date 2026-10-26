@@ -156,6 +156,7 @@ class NativeProbe:
                 raise SendWindowExpired("native probe SDK send deadline exceeded")
             self.integrator.commit(proposal)
             self.accepted_keys = keys
+            self.key_feedback.sent(keys)
             self.paused, self.phase, self.last_confirmation = False, "moving", None
             self.deadline_misses, self.waiting_since = 0, None
             self.target_stamps.append(self.clock.monotonic())

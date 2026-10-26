@@ -29,7 +29,8 @@ from astra_vla.rpc import call
 from astra_vla.teleop import BACKEND_LABELS, EXECUTION_BACKENDS, JOINT_KEYS, KEYS, SPEED_PROFILES, Integrator, Policy, pose
 from astra_vla.teleop_preferences import BINDING_HELP, DEFAULT_BINDINGS, DesktopPreferences
 from astra_vla.window_recording import WindowRecording
-from astra_vla.demonstrations import DemonstrationRecording, available, select_reference
+from astra_vla.demonstrations import DemonstrationRecording, available, select_reference, demonstration_label
+from astra_vla.step_feedback import feedback_text
 
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 
@@ -710,6 +711,7 @@ class Window:
         # Public external prose has its own queue: it must not evict live faults
         # or enter the input/RPC path. Demos never read the real source implicitly.
         self.codex_chat = deque(maxlen=32)
+        self.step_chat = {}
         self.codex_session = None if demo else PublicSessionFeed()
         self.codex_messages = (CodexMessageReader(codex_messages_path, max_age_s=20.)
                                if not demo or codex_messages_path is not None else None)
@@ -848,7 +850,7 @@ class Window:
                     self.demonstration_index = 0
                     reference = RUNTIME/'demonstration_reference.json'
                     data = json.loads(reference.read_text()) if not self.demo and reference.exists() else {}
-                    self.demonstration_reference = Path(data['directory']).name if data.get('enabled') else '关闭'
+                    self.demonstration_reference = demonstration_label(data['directory']) if data.get('enabled') else '未标记'
                 elif name == 'demonstration_mode':
                     if self.demonstration.status()['state'] not in ('recording', 'finalizing'):
                         self.demonstration_mode = ('human_teleop' if self.demonstration_mode == 'human_objects'
@@ -881,12 +883,12 @@ class Window:
                         raise ValueError('暂无完整保存的真实示范')
                     path = paths[self.demonstration_index % len(paths)]
                     select_reference(path)
-                    self.demonstration_reference = path.name
-                    self.demonstration_notice = 'Codex 参考已启用：'+path.name
+                    self.demonstration_reference = demonstration_label(path)
+                    self.demonstration_notice = '重点已标记；Memory仍自动查看全部示范'
                 elif name == 'demonstration_clear':
                     select_reference()
-                    self.demonstration_reference = '关闭'
-                    self.demonstration_notice = 'Codex 示范参考已关闭'
+                    self.demonstration_reference = '未标记'
+                    self.demonstration_notice = '重点已清除；Memory仍自动查看全部示范'
             except Exception as exc:
                 self.demonstration_notice = str(exc)
             return
@@ -1250,18 +1252,21 @@ class Window:
                  ('示范保存中…' if status['state'] == 'finalizing' else '开始录制三路 RGB / 反馈')),
                 ('resume_view', '返回实时画面 / 继续示教'),
                 ('demonstration_next', '浏览已保存示范（下一条）'),
-                ('demonstration_select', '将当前示范选为 Codex 参考'),
-                ('demonstration_clear', '关闭 Codex 示范参考'),
+                ('demonstration_select', '标记当前示范为重点（Memory自动发现全部）'),
+                ('demonstration_clear', '清除示范重点标记'),
                 ('settings_back', '返回菜单')]
         for index, (name, label) in enumerate(rows):
             self.button(name, label, pg.Rect(rect.x+18, rect.y+56+index*37, rect.width-36, 31))
         paths = self.demonstration_candidates
-        current = paths[self.demonstration_index % len(paths)].name if paths else '暂无已保存真实示范'
+        try:
+            current = demonstration_label(paths[self.demonstration_index % len(paths)]) if paths else '暂无已保存真实示范'
+        except (OSError, ValueError):
+            current = '示范元数据不可读，请重新浏览'
         state_label = {'idle': '尚未开始录制', 'recording': '录制中', 'finalizing': '保存中',
                        'saved': '已保存', 'error': '录制失败'}[status['state']]
         lines = [current, status['error'] or self.demonstration_notice or state_label,
                  '亲手示范须先退出控制并确认静止；不会自动失能。',
-                 '当前参考：'+self.demonstration_reference]
+                 '重点标记：'+self.demonstration_reference+' · Memory无需选择']
         for index, line in enumerate(lines):
             self.text(line[:65], (rect.x+18, rect.y+325+index*24), font=self.small)
 
@@ -1417,6 +1422,17 @@ class Window:
     def draw_chat(self, robot, telemetry, error, camera_error):
         """Timestamped system chat; active failures persist even with F1 hidden."""
         tick = time.monotonic()
+        for report in telemetry.get('step_feedback', []):
+            identity = (report['session'], report['id'])
+            previous = self.step_chat.get(identity)
+            if previous is not None and previous['revision'] >= report['revision']:
+                continue
+            age = max(0., time.time()-report.get('observed_at', report['ended_at']))
+            self.step_chat[identity] = dict(stamp=datetime.fromtimestamp(report['ended_at']).strftime('%H:%M:%S'),
+                                           tick=tick-age, source='动作反馈', text=feedback_text(report),
+                                           color=(180, 235, 210), revision=report['revision'])
+        while len(self.step_chat) > 32:
+            self.step_chat.pop(next(iter(self.step_chat)))
         public_messages = self.codex_messages.poll() if self.codex_messages else []
         if self.codex_session:
             public_messages += self.codex_session.poll()
@@ -1469,6 +1485,7 @@ class Window:
         # Current failures take priority over fading informational history.
         visible = [entry for entry in self.chat if entry['source'] == '系统' and tick-entry['tick'] < 8]
         visible += [entry for entry in self.codex_chat if tick-entry['tick'] < 20]
+        visible += [entry for entry in self.step_chat.values() if tick-entry['tick'] < 20]
         visible.sort(key=lambda entry: entry['tick'])
         latest = {entry['source']: entry for entry in self.chat
                   if self.chat_current.get(entry['source']) == entry['text']}

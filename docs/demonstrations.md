@@ -1,4 +1,4 @@
-# 人类动作示范与可选 Codex 参考
+# 人类动作示范与自动 Memory 参考
 
 右侧“人类示范 / Codex 参考”或 Esc 菜单打开示范面板，选择类型后“开始录制”，返回实时画面完成示范，再打开面板“结束并保存”。录制不要求整窗录像开启，也不因切换主视角而漏掉另两路相机。
 
@@ -11,22 +11,25 @@
 |---|---|
 | `top.mp4`、`left_wrist.mp4`、`right_wrist.mp4` | 三路独立 RGB，最多每秒10帧；使用源帧时间，不把重复缓存填成新帧，无音频 |
 | `samples.jsonl` | 采样时间、各相机源时间/帧号/年龄，以及双臂 SDK 反馈、会话状态、所选臂/后端/档位、窗口按键和输入发送队列 |
-| `demonstration.json` | 示范类型、时间、帧数、队列丢弃数、保存状态、任务及备注 |
+| `demonstration.json` | 示范类型、时间、帧数、队列丢弃数、保存状态、任务/名称/描述/标签、结果及复核来源 |
 
 三路相机独立采样，不宣称硬件同步。缺少新帧时对应采样的 `cameras` 没有该路，录像时间保留间隙。输入队列记录不证明控制器实际执行；真实运动以 SDK 反馈和 RGB 复核。编码异步进行，队列最多保留两个采样，磁盘慢时丢旧采样，不阻塞按键。`closed=true`仅表示三路均有帧且正常收尾，不证明任务成功、画面全程新鲜或实际静止；长缺帧须读采样日志。
 
-在面板“浏览已保存示范”后点击“将当前示范选为 Codex 参考”，或关闭参考。保存本身不会自动启用参考；选择也不发送机器人指令。未收尾、失败、缺视频及 `--demo` 生成的模拟示范不能选为真实参考。录制目录和参考开关仅保存在本机，公开仓库不包含用户示范。
+保存后自动刷新 Memory 的示范索引，不需要用户手动选择。Codex 在开始/继续任务时自动查看任务地图和所有相关完整真实示范；未命名、描述不清或结果未知时，主动查看三路画面及关键连续阶段，生成可检索名称、描述、标签、结果及适用边界。目录ID不重命名，已有证据链接保持稳定。失败示范不支持成功地图，未知示范先分析复核，不因文件收尾正常而判成功。人手示范中闲置机械臂的SDK姿态不能当成人的动作轨迹。
 
-命令行可补充任务说明、选取参考和导出关键帧：
+面板原“选择参考”仅保留为重点标记；清除重点不会禁用 Memory 自动发现。未收尾、录制失败、缺视频及模拟示范不进入真实候选；已标为动作失败的示范也不能标记为成功动作参考。原片、标注和地图仅存本机，公开仓库不包含用户示范。
+
+以下接口由 Codex 在维护中使用，无需用户手动选取参考或填写名称：
 
 ```bash
 .venv/bin/python -m astra_vla.demonstrations list
 .venv/bin/python -m astra_vla.demonstrations annotate runs/demonstration_... --task '把瓶内少量水倒入杯中' --notes '瓶口靠近杯沿；回正后等残滴停止'
-.venv/bin/python -m astra_vla.demonstrations select runs/demonstration_...
 .venv/bin/python -m astra_vla.demonstrations export runs/demonstration_... --frames 6
-.venv/bin/python -m astra_vla.demonstrations clear
+.venv/bin/python -m astra_vla.operation_memory planning-context --instruction '本次完整指令'
 ```
 
-选择写入 `.runtime/demonstration_reference.json`。Codex 操作任务开始时检查此文件；仅 `enabled=true` 时读取指向的元数据、任务/备注、三路关键帧和必要的采样日志。导出生成示范目录下 `reference/index.md` 和各路带实际录像时间的 JPG；均匀抽帧可能遗漏短动作，需要继续查看原视频及对应时段。可在任务指令中指出重点阶段和示范路径。
+`annotate`还支持 `--title/--description/--tags/--outcome/--basis/--evidence/--limitations`，默认由 Codex 标注；成功必须有视觉复核或当次用户确认及已存在证据。任务解释或描述改变时，旧成功标签会撤回到未知，需要重新复核。标注有界保留修订摘要。重点标记仍写入 `.runtime/demonstration_reference.json`，但它不再控制自动发现。
+
+导出生成示范目录下 `reference/index.md` 和各路带实际录像时间的 JPG；均匀抽帧可能遗漏短动作，需要继续查看原视频及对应时段。Codex自行分析命名，录制器只自动建立待分析条目，不在后台运行视觉模型。成功示范如何形成节点地图、在新输入/场景下动态复用，以及失效/失败引用如何移除，见[任务地图](task_memory.md)。
 
 示范帮助理解顺序、抓取位置、物体关系和完成条件。人手与机械臂形态不同、物体可能移动、相机未标定，不能直接复制空间坐标或按键时长。每次动作前仍重新观察当前三路 RGB 和双臂反馈，按现有控制入口及停止、自碰撞等保护执行。功能不包含轨迹自动重放、手部三维重建或模型训练。软件测试与离线预览不代表真实人类示范或真机示教已验收。

@@ -243,6 +243,7 @@ class DetourControl:
             self.reason = '正在绕行到固定TCP目标；松键或改键取消'
             self.deadline_misses = 0
             self.accepted_keys = keys
+            self.key_feedback.sent(keys)
             self.target_stamps.append(self.clock.monotonic())
             self.trace.record('detour_target', generation=generation, keys=sorted(keys),
                               joints_sdk=result['joint_sdk'], state=refreshed,

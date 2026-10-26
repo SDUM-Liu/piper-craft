@@ -97,3 +97,29 @@ def test_bounded_queue_and_simulated_reference_rejection(tmp_path):
     (recorder.path/'demonstration.json').write_text(json.dumps(data))
     with pytest.raises(ValueError, match='离线'):
         select_reference(recorder.path, destination=tmp_path/'reference.json')
+
+
+def test_codex_names_and_reviews_recordings_without_renaming_ids_or_assuming_success(tmp_path):
+    from astra_vla.demonstrations import annotate, demonstration_label
+    directory = tmp_path/'runs/demonstration_20261025_test'
+    directory.mkdir(parents=True)
+    for name in CAMERAS:
+        (directory/(name+'.mp4')).write_bytes(b'synthetic fixture')
+    (directory/'demonstration.json').write_text(json.dumps(dict(
+        kind='human_demonstration', mode='human_teleop', simulated=False, closed=True, error='')))
+    (tmp_path/'observed.jpg').write_bytes(b'synthetic fixture')
+    with pytest.raises(ValueError, match='成功需要'):
+        annotate(directory, task='收纳', outcome='success', root=tmp_path)
+    data = annotate(directory, task='物体归位', title='遥控示教·物体归位', description='接近、低位释放、撤开',
+                    tags=['收纳'], outcome='success', basis='visual_review', evidence=['observed.jpg'],
+                    limitations='仅合成元数据测试', root=tmp_path)
+    assert directory.exists() and data['outcome'] == 'success'
+    assert demonstration_label(directory) == '遥控示教·物体归位 · 成功已复核'
+    catalog = json.loads((tmp_path/'docs/memory/task_maps.json').read_text())
+    assert catalog['maps'] == []  # Naming/success annotation never invents a task route.
+    assert '遥控示教·物体归位' in (tmp_path/'docs/memory/task_maps.md').read_text()
+    data = annotate(directory, task='不同的任务', description='不同的完成条件', root=tmp_path)
+    assert data['outcome'] == 'unknown' and 'outcome_evidence' not in data
+    annotate(directory, task='不同的任务', outcome='failure', root=tmp_path)
+    with pytest.raises(ValueError, match='失败示范'):
+        select_reference(directory, destination=tmp_path/'reference.json')

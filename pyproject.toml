@@ -23,6 +23,7 @@ piper-craft-desktop = "astra_vla.teleop_desktop:main"
 piper-craft-message = "astra_vla.codex_messages:main"
 piper-craft-memory = "astra_vla.operation_memory:main"
 piper-craft-demonstrations = "astra_vla.demonstrations:main"
+piper-craft-task-memory = "astra_vla.task_memory:main"
 
 [build-system]
 requires = ["hatchling"]
