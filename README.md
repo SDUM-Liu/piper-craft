@@ -94,3 +94,5 @@ uv run python scripts/check_robot_memory.py
 ## 许可证
 
 本项目采用 [MIT](LICENSE)；外部SDK、ROS包、机器人描述和依赖保留各自许可证，见[第三方组件](THIRD_PARTY_NOTICES.md)。
+
+本地方案进入控制后，点击右侧“回 Sleep”可让所选臂自动回到本机标定的关节位置，保留完整路径自碰撞、反馈与停止守护。新部署需先配置 `config/sleep_pose.json`；详见 [Sleep 回位](docs/teleop.md#自动回到-sleep)。

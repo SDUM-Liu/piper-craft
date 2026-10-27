@@ -674,7 +674,7 @@ class Robot:
         if method == 'preflight':
             return {name: self.check_prepare(name) for name in args.get('arms', list(self.arms))}
         methods = {'teleop_open': self.teleop.open, 'teleop_input': self.teleop.input,
-                   'teleop_close': self.teleop.close}
+                   'teleop_close': self.teleop.close, 'teleop_sleep': self.teleop.return_sleep}
         if method not in methods:
             raise ValueError('unknown robot method; PIPER CRAFT teleop only')
         return methods[method](args)

@@ -5,5 +5,7 @@
   "goal_horizon_s": 1.0,
   "planning_timeout_s": 8.0,
   "execution_timeout_s": 120.0,
-  "search_seeds": 16
+  "search_seeds": 16,
+  "speed_percent": 100,
+  "joint_lead_deg": 6.0
 }

@@ -21,6 +21,8 @@ class DetourPolicy:
     planning_timeout_s: float = 8.
     execution_timeout_s: float = 120.
     search_seeds: int = 16
+    speed_percent: int = 100
+    joint_lead_deg: float = 6.
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
@@ -32,6 +34,11 @@ class DetourPolicy:
                 raise ValueError('invalid detour policy: '+name)
         if type(self.search_seeds) is not int or not 3 <= self.search_seeds <= 32:
             raise ValueError('invalid detour seed count')
+        if type(self.speed_percent) is not int or not 1 <= self.speed_percent <= 100:
+            raise ValueError('invalid detour SDK speed percentage')
+        if (isinstance(self.joint_lead_deg, bool) or not isinstance(self.joint_lead_deg, (int, float))
+                or not math.isfinite(self.joint_lead_deg) or not 0 < self.joint_lead_deg <= 6):
+            raise ValueError('invalid detour joint following budget')
 
     @classmethod
     def load(cls):

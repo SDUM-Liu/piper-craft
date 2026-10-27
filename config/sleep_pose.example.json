@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "description": "Copy to sleep_pose.json and replace each null with six calibrated SDK integer joint targets (0.001 degree). Unconfigured arms cannot return to sleep.",
+  "arms": {
+    "left": {"joints_raw": null},
+    "right": {"joints_raw": null}
+  }
+}

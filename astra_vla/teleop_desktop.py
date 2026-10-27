@@ -202,6 +202,7 @@ class Client:
         self.sequence = 0
         self.keys = []
         self.focused = True
+        self.cancel_detour = False
         self.ui_tick = time.monotonic()
         self.threads = []
         self.opening = False
@@ -212,11 +213,12 @@ class Client:
             thread.start()
             self.threads.append(thread)
 
-    def intent(self, controls, focused):
+    def intent(self, controls, focused, *, cancel_detour=False):
         with self.lock:
             keys = sorted(controls.keys) if focused and self.pending_backend is None else []
             changed = (keys != self.keys or focused != self.focused or
-                       self.speed_profile != controls.speed_profile)
+                       self.speed_profile != controls.speed_profile or self.cancel_detour != cancel_detour)
+            self.cancel_detour = cancel_detour
             self.speed_profile = controls.speed_profile
             self.keys = keys
             self.focused, self.ui_tick = focused, time.monotonic()
@@ -483,6 +485,17 @@ class Client:
             with self.lock:
                 self.session, self.keys = None, []
                 self.control_active = False
+        elif action == 'sleep':
+            with self.lock:
+                if (not session or not self.control_active or self.opening or self.stop_pending or
+                        self.pending_backend or not self.focused or self.cancel_detour or
+                        time.monotonic() - self.ui_tick > .1):
+                    raise RuntimeError('请关闭菜单并为所选臂进入控制，再请求回 Sleep')
+                if self.execution_backend != 'regularized_move_j':
+                    raise ValueError('回 Sleep 请先切换到本地方案')
+            self.rpc(RUNTIME / 'robot.sock', 'teleop_sleep',
+                     {'session': session, 'arm': arm}, timeout=2)
+            self.error = ''
         elif action == 'acknowledge':
             snapshot = self.rpc(RUNTIME / 'cameras.sock', 'snapshot', timeout=1)
             if any(not f.get('available') or time.time() - f.get('stamp', 0) > .6
@@ -517,6 +530,7 @@ class Client:
                     self.execute(action, arm)
                 with self.lock:
                     session, keys, focused = self.session, list(self.keys), self.focused
+                    cancel_detour = self.cancel_detour
                     profile = self.speed_profile
                     backend = self.execution_backend
                     control_active = self.control_active
@@ -531,6 +545,7 @@ class Client:
                         self.rpc(RUNTIME / 'robot.sock', 'teleop_input',
                                  {'session': session, 'sequence': sequence, 'keys': keys,
                                   'focused': True, 'ui_age_s': ui_age, 'speed_profile': profile,
+                                  'cancel_detour': cancel_detour,
                                   'execution_backend': backend}, timeout=.2)
             except Exception as exc:
                 # On input failure never keep replaying a stale intent. The worker
@@ -588,7 +603,7 @@ class DemoClient:
     def start(self):
         pass
 
-    def intent(self, controls, focused):
+    def intent(self, controls, focused, *, cancel_detour=False):
         if not focused:
             if self.session:
                 self.request('close')
@@ -597,7 +612,7 @@ class DemoClient:
             self.speed_profile = controls.speed_profile
             self.policy = self.base_policy.for_speed(self.speed_profile)
             return
-        keys = frozenset(controls.keys)
+        keys = frozenset() if cancel_detour else frozenset(controls.keys)
         now = self.clock()
         with self.lock:
             state = self.robot['arms'][self.arm]
@@ -650,6 +665,8 @@ class DemoClient:
                 self.error = '离线模拟已停止；未连接设备'
             elif action == 'acknowledge':
                 self.error = ''
+            elif action == 'sleep':
+                self.error = '离线演示不执行 Sleep 回位；需配置位置并在实机本地会话中使用'
 
     def request_backend(self, backend):
         if backend not in EXECUTION_BACKENDS:
@@ -825,7 +842,7 @@ class Window:
                     not self.pg.mouse.get_pressed()[0]):
                 self.controls.keys.discard(self.mouse_joint)
                 self.mouse_joint = None
-        self.client.intent(self.controls, self.focused)
+        self.client.intent(self.controls, self.focused, cancel_detour=self.menu_open)
 
     def toggle_menu(self):
         self.controls.blur()
@@ -942,6 +959,10 @@ class Window:
         elif name == 'speed':
             self.controls.press('tab')
             self.publish_intent()
+        elif name == 'sleep':
+            self.controls.blur()
+            self.publish_intent()
+            self.client.request('sleep', self.controls.arm)
         elif name == 'menu':
             self.toggle_menu()
         elif name == 'record_window':
@@ -1105,7 +1126,7 @@ class Window:
         title = ('左臂' if self.controls.arm == 'left' else '右臂')+' · '+profile
         detour = self.client.robot.get('teleop', {}).get('detour', {})
         if detour.get('state') != 'idle' and detour.get('state'):
-            title += ' · '+('绕行 %.0f%%' % (100*detour.get('progress', 0))
+            title += ' · '+(('Sleep' if detour.get('kind') == 'sleep' else '绕行')+' %.0f%%' % (100*detour.get('progress', 0))
                             if detour['state'] == 'executing' else '后台规划')
         self.text(title, (x, y), font=self.small)
         y += 27
@@ -1124,7 +1145,7 @@ class Window:
         rows = [(('left', self.key_label('1')+' 左臂'), ('right', self.key_label('2')+' 右臂')),
                 (('open', '进入控制'), ('acknowledge', '现场确认')),
                 (('backend', backend_label),),
-                (('speed', self.key_label('tab')+' 档位：'+profile),),
+                (('speed', self.key_label('tab')+' '+profile), ('sleep', '回 Sleep')),
                 (('record_window', record_label),),
                 (('demonstrations', demonstration_label),),
                 (('retry_cameras', '恢复相机'), ('menu', 'Esc 菜单'))]
@@ -1307,7 +1328,7 @@ class Window:
                 self.text(help_text, (x+14, y+2), font=self.small)
                 label = '按下新键…' if self.capture_binding == action else self.key_label(action)
                 self.button('bind:'+action, label, pg.Rect(x+270, y, 160, 27))
-            self.text('F9始终请求停止；Esc取消改键 / 返回菜单；长按持续运动，松键请求暂停。',
+            self.text('F9停止；Esc返回菜单并取消绕行；普通控制松键暂停，自动绕行无需长按。',
                       (rect.x+20, rect.bottom-87), font=self.small)
             self.button('restore_keys', '恢复默认按键', pg.Rect(rect.x+200, rect.bottom-45, 220, 34))
             self.button('settings_back', '返回菜单', pg.Rect(rect.x+440, rect.bottom-45, 220, 34))
@@ -1363,7 +1384,7 @@ class Window:
         feedback_age = state.get('age_s')
         phase = telemetry.get('phase', 'observing')
         phase_label = {'observing': '只观察', 'ready': '等待按键', 'moving': '连续控制',
-                       'detour_planning': '后台规划绕行', 'detour_executing': '绕行中（松键取消）',
+                       'detour_planning': '后台规划自动绕行', 'detour_executing': '自动快速绕行（Esc/F9取消）',
                        'entry_blocked': '进入控制被阻止', 'waiting_feedback': '等待机械臂跟随',
                        'pausing': '正在确认静止', 'stopping': '已请求停止', 'stopped': '停止已确认',
                        'stop_unconfirmed': '停止尚未确认'}.get(phase, phase)
@@ -1449,8 +1470,12 @@ class Window:
         if blocker:
             normal_exit = str(blocker) in ('desktop close', 'desktop control closed', 'desktop escape', 'desktop stop',
                                            '离线模拟已停止；未连接设备')
-            current['控制'] = (('' if normal_exit else '无法执行：') + control_message(blocker, telemetry).replace('F3', self.key_label('f3')),
-                               (190, 190, 190) if normal_exit else (255, 100, 100))
+            sleep_notice = (not error and not robot.get('fault') and
+                            telemetry.get('sleep_return', {}).get('state') in
+                            ('waiting', 'planning', 'executing', 'settling', 'completed'))
+            informational = normal_exit or sleep_notice
+            current['控制'] = (('' if informational else '无法执行：') + control_message(blocker, telemetry).replace('F3', self.key_label('f3')),
+                               (190, 220, 190) if informational else (255, 100, 100))
         if camera_error:
             current['相机'] = ('画面源异常：' + camera_error, (255, 170, 80))
         if robot.get('stopped') and not robot.get('stop_confirmed'):

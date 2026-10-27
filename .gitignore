@@ -10,6 +10,7 @@ build/
 dist/
 runs/
 config/verified.json
+config/sleep_pose.json
 
 # Credentials and private machine files
 .env

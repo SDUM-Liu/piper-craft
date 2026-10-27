@@ -62,9 +62,11 @@ def test_repeat_switch_and_blur_clear_keys():
 def test_press_and_release_wake_rpc_sender_without_waiting_for_heartbeat():
     waiting, received = threading.Event(), threading.Event()
     inputs = []
+    cancellations = []
     def rpc(_path, method, args, **_):
         assert method == 'teleop_input'
         inputs.append(args['keys'])
+        cancellations.append(args['cancel_detour'])
         received.set()
         return {'accepted': True}
     client = Client(rpc=rpc)
@@ -86,6 +88,12 @@ def test_press_and_release_wake_rpc_sender_without_waiting_for_heartbeat():
             client.intent(controls, True)
             assert received.wait(.2) and waiting.wait(.2)
             assert inputs[-1] == keys
+        for cancel in (True, False):
+            waiting.clear()
+            received.clear()
+            client.intent(controls, True, cancel_detour=cancel)
+            assert received.wait(.2) and waiting.wait(.2)
+            assert cancellations[-1] is cancel
     finally:
         client.done.set()
         client.input_changed.set()
@@ -394,6 +402,7 @@ def test_menu_clears_live_intent_blocks_motion_and_f9_is_the_global_stop(window)
     assert client.keys == ['w']
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_ESCAPE, repeat=False))
     assert window.menu_open and client.keys == [] and client.session == 'offline-test'
+    assert client.cancel_detour
     assert client.focused and client.control_active
     for key in (pg.K_w, pg.K_SPACE, pg.K_q, pg.K_i):
         window.handle(pg.event.Event(pg.KEYDOWN, key=key, repeat=False))
@@ -404,6 +413,7 @@ def test_menu_clears_live_intent_blocks_motion_and_f9_is_the_global_stop(window)
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_ESCAPE, repeat=False))
     window.publish_intent()
     assert not window.menu_open and not client.keys
+    assert not client.cancel_detour
     calls = []
     client.request = lambda *args: calls.append(args)
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_F9, repeat=False))
@@ -418,7 +428,7 @@ def test_controls_are_below_minimap_and_menu_actions_stay_in_menu(window, size):
     window.draw()
     from astra_vla.teleop import JOINT_KEYS
     assert set(window.buttons) == {'left', 'right', 'open', 'acknowledge', 'backend', 'speed', 'record_window',
-                                   'demonstrations', 'retry_cameras', 'menu'} | JOINT_KEYS
+                                   'demonstrations', 'retry_cameras', 'menu', 'sleep'} | JOINT_KEYS
     assert all(window.sidebar_rect.contains(rect) and rect.top > window.minimap_rect.bottom
                for rect in [*window.buttons.values(), *window.key_rects.values()])
     assert all(not rect.colliderect(window.main_image_rect)
@@ -919,3 +929,15 @@ def test_backend_button_is_available_in_menu_when_hud_is_hidden(window):
     window.handle(pg.event.Event(pg.MOUSEBUTTONDOWN, button=1, pos=window.buttons['backend'].center))
     assert window.client.execution_backend == 'controller_move_p'
     assert not window.client.session
+
+
+def test_sleep_button_clears_keys_and_requests_selected_arm_without_opening(window):
+    window.menu_open = False
+    window.controls.arm = 'right'
+    window.controls.keys = {'w', 'q'}
+    requests = []
+    window.client.request = lambda *args: requests.append(args)
+    window.activate('sleep')
+    assert not window.controls.keys
+    assert requests == [('sleep', 'right')]
+    assert window.client.session is None
