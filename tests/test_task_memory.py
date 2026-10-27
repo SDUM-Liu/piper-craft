@@ -1,4 +1,4 @@
-"""Synthetic evidence only: task-map provenance and invalidation, never hardware."""
+"""Synthetic fixtures: durable reflections and fresh scene reviews, never hardware."""
 
 import copy
 import json
@@ -43,6 +43,9 @@ def graph():
             dict(
                 id="one",
                 kind="robot_task",
+                summary="合成案例：观察桌面支撑后分步释放，物体独立稳定。",
+                reflection="分步释放提供再次观察支撑的机会；此测试不验证实体效果。",
+                limitations=["合成测试，不是实机成功经验"],
                 source="result.json",
                 review=dict(
                     outcome="success",
@@ -60,6 +63,7 @@ def graph():
                 preconditions="反馈和RGB有效",
                 completion="物体及支撑位置可判读",
                 adaptation="遮挡则换视角",
+                reflection="图像存在不代表能判断支撑关系；看不清需补观察。",
                 case_ids=["one"],
                 evidence=["image.jpg"],
             ),
@@ -69,6 +73,7 @@ def graph():
                 preconditions="支撑已确认",
                 completion="物体独立稳定",
                 adaptation="分步开爪再观察",
+                reflection="释放前后分别观察，避免把持物状态误当作独立稳定。",
                 case_ids=["one"],
                 evidence=["image.jpg"],
             ),
@@ -101,6 +106,49 @@ def test_success_graph_requires_new_instruction_scene_review_and_expires(library
     assert store.context("把物体归位", "scene-a")["maps"][0]["decision"] == "assessment_required"
 
 
+def test_planning_focus_is_available_without_any_prior_success_or_demo(library):
+    store, _ = library
+    context = store.context("抓起新物体")
+    assert not context["maps"] and not context["demonstrations"]
+    assert {"observation_views", "grasp_depth"} <= set(context["reuse_checks"])
+    assert "另一腕" in context["planning_focus"]["observation_views"]
+    assert "两侧接触" in context["planning_focus"]["grasp_depth"]
+    assert "抓夹深度" in (store.directory / "task_maps.md").read_text()
+
+
+@pytest.mark.parametrize("dimension", ["observation_views", "grasp_depth"])
+def test_reuse_requires_explicit_view_and_depth_reviews(library, dimension):
+    store, _ = library
+    store.put(graph())
+    assessment = review()
+    assessment["checks"].pop(dimension)
+    with pytest.raises(ValueError, match=dimension):
+        store.assess("store", assessment)
+    assessment = review()
+    assessment["checks"][dimension] = dict(verdict="reject", reason="关键接触被挡住，不能确认夹深")
+    assert store.assess("store", assessment)["decision"] == "reject"
+    assert store.context(assessment["instruction"], "scene-a")["maps"][0]["decision"] == "reject"
+    assessment["checks"][dimension]["verdict"] = "adapt"
+    with pytest.raises(ValueError, match="adjustments"):
+        store.assess("store", assessment)
+    assessment["adjustments"] = ["暂停抓持推进，补腕部侧视后重新评估接触区域和夹深"]
+    assert store.assess("store", assessment)["decision"] == "adapt"
+
+
+def test_legacy_nine_dimension_review_is_dropped_without_removing_success(library):
+    store, _ = library
+    store.put(graph())
+    store.assess("store", review())
+    with store.edit() as state:
+        for dimension in ("observation_views", "grasp_depth"):
+            state["assessments"][0]["checks"].pop(dimension)
+    context = store.context("把物体归位", "scene-a")
+    assert context["maps"][0]["decision"] == "assessment_required"
+    state = store.read()
+    assert not state["assessments"] and len(state["maps"]) == 1
+    assert not state["invalidations"]
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -109,6 +157,10 @@ def test_success_graph_requires_new_instruction_scene_review_and_expires(library
         "simulated",
         "closure_only",
         "missing_evidence",
+        "missing_summary",
+        "missing_reflection",
+        "missing_limitations",
+        "missing_node_reflection",
         "node_provenance",
         "edge_provenance",
         "dangling_edge",
@@ -129,6 +181,10 @@ def test_unsuccessful_or_unproven_routes_never_enter_library(library, change):
         case["review"]["result_checks"] = {"stop_confirmed": True}
     elif change == "missing_evidence":
         case["review"]["evidence"] = ["missing.jpg"]
+    elif change in ("missing_summary", "missing_reflection", "missing_limitations"):
+        case.pop(change.removeprefix("missing_"))
+    elif change == "missing_node_reflection":
+        data["nodes"][0].pop("reflection")
     elif change == "node_provenance":
         data["nodes"][0]["case_ids"] = ["unknown"]
     elif change == "edge_provenance":
@@ -153,24 +209,121 @@ def test_reference_failure_removes_graph_and_assessments_not_failed_nodes(librar
     assert "nodes" not in state["invalidations"][-1]
 
 
-@pytest.mark.parametrize("change", ["missing", "edited", "new_failure", "expired"])
-def test_compact_removes_stale_or_changed_evidence_in_place(library, change):
-    store, clock = library
-    data = graph()
-    if change == "expired":
-        data["valid_until"] = 101.0
-    store.put(data)
+@pytest.mark.parametrize("change", ["missing", "edited", "new_failure"])
+def test_run_cleanup_or_rewrite_does_not_remove_learned_summaries(library, change):
+    store, _ = library
+    saved = store.put(graph())
     if change == "missing":
         (store.root / "image.jpg").unlink()
+        (store.root / "result.json").unlink()
     elif change == "edited":
         (store.root / "image.jpg").write_bytes(b"different")
-    elif change == "new_failure":
-        (store.root / "result.json").write_text(json.dumps({"task_completed": False}))
     else:
-        clock[0] = 102.0
+        (store.root / "result.json").write_text(json.dumps({"task_completed": False}))
+    store.compact()
+    context = store.context("把物体归位")["maps"][0]
+    assert context["cases"] == saved["cases"]
+    assert context["nodes"] == saved["nodes"]
+    assert context["decision"] == "assessment_required"
+    assert not store.read()["invalidations"]
+    assert "image.jpg" not in json.dumps(context)
+    assert "result.json" not in json.dumps(context)
+
+
+def test_explicit_expiry_still_removes_outdated_knowledge(library):
+    store, clock = library
+    data = graph()
+    data["valid_until"] = 101.0
+    store.put(data)
+    clock[0] = 102.0
     store.compact()
     assert not store.read()["maps"]
     assert "store**" not in (store.directory / "task_maps.md").read_text()
+
+
+def test_self_contained_reflections_need_no_run_files_and_revise_after_cleanup(library):
+    store, _ = library
+    data = graph()
+    data["nodes"][0]["reference_state"] = dict(
+        source="result.json", arm="right", reference_only=True, joints_deg=[0.0] * 6
+    )
+    # A reviewed summary can be authored directly, without file pointers.
+    store.distill(data)
+    for path in store.root.glob("*.*"):
+        path.unlink()
+    saved = store.put(data)
+    assert saved["cases"][0]["reflection"] == data["cases"][0]["reflection"]
+    assert saved["nodes"][0]["reference_state"]["joints_deg"] == [0.0] * 6
+    assert "source" not in saved["nodes"][0]["reference_state"]
+    saved["cases"][0]["limitations"].append("同案澄清，不新增实机成功")
+    assert store.put(saved)["revision"] == 2
+    assert len(store.context("新任务")["maps"]) == 1
+
+
+def test_legacy_maps_migrate_after_all_run_files_are_deleted(library):
+    store, _ = library
+    old = graph()
+    for case in old["cases"]:
+        for field in ("summary", "reflection", "limitations"):
+            case.pop(field)
+    for node in old["nodes"]:
+        node.pop("reflection")
+    old.update(revision=3, fingerprints={"image.jpg": {"sha256": "old"}}, reference_only=True)
+    store.directory.mkdir()
+    store.path.write_text(json.dumps(dict(version=1, maps=[old], assessments=[{}], invalidations=[])))
+    for path in store.root.glob("*.*"):
+        path.unlink()
+    store.compact()
+    state = store.read()
+    assert state["version"] == 2 and not state["assessments"]
+    migrated = state["maps"][0]
+    assert migrated["revision"] == 4
+    assert migrated["cases"][0]["summary"] == old["cases"][0]["review"]["statement"]
+    assert "未独立" in migrated["cases"][0]["reflection"]
+    assert migrated["nodes"][0]["adaptation"] == old["nodes"][0]["adaptation"]
+    assert not any(key in json.dumps(migrated) for key in ("image.jpg", "result.json", "fingerprints"))
+    store.compact()
+    assert store.read()["maps"] == state["maps"]  # Migration is idempotent.
+
+
+def test_success_revocation_is_explicit_and_clears_scene_assessments(library):
+    store, _ = library
+    store.put(graph())
+    store.assess("store", review())
+    store.invalidate("store", "success_revoked", "复核发现原案例完成判定错误")
+    assert store.read()["maps"] == store.read()["assessments"] == []
+
+
+def test_cleanup_of_current_scene_requires_reassessment_but_preserves_knowledge(library):
+    store, _ = library
+    saved = store.put(graph())
+    store.assess("store", review())
+    assert store.context("把物体归位", "scene-a")["maps"][0]["decision"] == "use"
+    for path in store.root.glob("*.*"):
+        path.unlink()
+    context = store.context("把物体归位", "scene-a")["maps"][0]
+    assert context["decision"] == "assessment_required"
+    assert context["assessment"] is None
+    assert context["cases"] == saved["cases"] and context["nodes"] == saved["nodes"]
+
+
+@pytest.mark.parametrize("change", ["failed", "unknown", "simulated", "closure_only"])
+def test_inline_case_review_cannot_admit_unsuccessful_or_unreviewed_outcomes(library, change):
+    store, _ = library
+    data = graph()
+    store.distill(data)
+    result = data["cases"][0]["review"]
+    if change == "failed":
+        result["result_checks"]["task_completed"] = False
+    elif change == "unknown":
+        result["outcome"] = "unknown"
+    elif change == "simulated":
+        result["result_checks"]["simulated"] = True
+    else:
+        result["result_checks"] = {"closed": True}
+    with pytest.raises(ValueError):
+        store.put(data)
+    assert not store.read()["maps"]
 
 
 def test_dynamic_adaptation_and_map_revision_require_new_review(library):
@@ -272,11 +425,13 @@ def test_memory_auto_discovers_all_real_demos_without_focus_selector(library):
                     simulated=simulated,
                     outcome=outcome,
                     title=name,
+                    limitations="另一腕被持物挡住，抓夹深度未知",
                 )
             )
         )
     context = store.context("新任务")
     assert {d["title"] for d in context["demonstrations"]} == {"first", "second"}
+    assert all(d["limitations"] == "另一腕被持物挡住，抓夹深度未知" for d in context["demonstrations"])
     assert next(d for d in context["demonstrations"] if d["title"] == "second")["success_review_required"]
     assert not context["maps"]
     assert "无需手动选择" in (store.directory / "task_maps.md").read_text()

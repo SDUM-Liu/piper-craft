@@ -1,4 +1,4 @@
-"""Success-backed task graphs for Codex planning reference. Never sends motion."""
+"""Durable task reflections for Codex planning reference. Never sends motion."""
 
 import argparse
 import copy
@@ -21,11 +21,23 @@ REUSE_CHECKS = (
     "arm_roles",
     "start_state",
     "backend",
+    "observation_views",
     "grasp",
+    "grasp_depth",
     "completion",
     "reference_limits",
 )
-REASONS = ("reference_failure", "outdated", "invalid", "source_changed")
+PLANNING_FOCUS = {
+    "observation_views": "逐阶段写明顶视、操作腕和另一腕各看清什么、哪里遮挡；"
+    "未选中臂的腕相机也须主动查看。抓前、试提/短移后、倾倒/插入前及释放前重新核查。"
+    "关键接触/高度看不清先暂停、补观察；调整观察臂仍须新RGB/双臂反馈和普通运动保护。",
+    "grasp_depth": "闭爪前用腕部近视与可用辅助侧视交叉检查物体进入双指的程度、"
+    "两侧接触区域、夹持高度及指尖到桌面/邻物间隙，避免仅指尖浅夹；"
+    "并非越深越好，不盲推到底。试提/短移后复查相对滑移/转动。"
+    "开度、effort、SDK末端或已提起不能证明夹深/保持力；未知写未知，"
+    "无标定不报毫米深度，不跨瓶身/球头/筒身套用旧抓点。",
+}
+REASONS = ("reference_failure", "outdated", "invalid", "success_revoked")
 
 
 def sentence(value, name):
@@ -76,11 +88,38 @@ class TaskMemory:
 
     def read(self):
         if not self.path.exists():
-            return {"version": 1, "maps": [], "assessments": [], "invalidations": []}
+            return {"version": 2, "maps": [], "assessments": [], "invalidations": []}
         state = json.loads(self.path.read_text())
-        if state.get("version") != 1:
+        if state.get("version") == 1:
+            # These graphs were reviewed on admission. Preserve their recorded
+            # conclusions even when the original run has already been cleaned.
+            # Migration cannot invent a causal explanation or new physical facts.
+            for graph in state["maps"]:
+                for case in graph["cases"]:
+                    case.setdefault("summary", case["review"]["statement"])
+                    case.setdefault("reflection", "旧版未独立总结原因；仅沿用已有节点的条件与调整规则，效果与因果仍需复核。")
+                    case.setdefault("limitations", list(graph["non_transferable"]))
+                for node in graph["nodes"]:
+                    node.setdefault("reflection", "旧版未独立解释策略原因；保留既有条件和调整规则，作用机理未验证。")
+                self.distill(graph)
+                graph["revision"] += 1
+            state["version"] = 2
+            state["assessments"] = []
+        if state.get("version") != 2:
             raise ValueError("unsupported task-memory version")
         return state
+
+    @staticmethod
+    def distill(graph):
+        """Keep conclusions and inline references, never run-file dependencies."""
+        graph.pop("fingerprints", None)
+        for case in graph["cases"]:
+            case.pop("source", None)
+            case["review"].pop("evidence", None)
+        for node in graph["nodes"]:
+            node.pop("evidence", None)
+            if "reference_state" in node:
+                node["reference_state"].pop("source", None)
 
     @contextmanager
     def edit(self):
@@ -101,7 +140,7 @@ class TaskMemory:
             "# 成功案例任务地图",
             "",
             "仅供规划参考，不重放坐标、关节或按键。每次复用先评估新指令/现场，执行中动态调整。",
-            "完整节点、条件和证据在本机 `task_maps.json`；失败仅进入问题记忆，失效地图移除。",
+            "案例事实、反思、策略和适用边界自包含于本机 `task_maps.json`，不依赖运行文件；失败仅进入问题记忆。",
             "",
         ]
         for graph in state["maps"]:
@@ -111,7 +150,7 @@ class TaskMemory:
                 "  任务：" + brief(graph['task'], 180),
             ]
         if not state["maps"]:
-            lines.append("暂无经过成功证据复核的地图。")
+            lines.append("暂无经过真实成功复核并总结的地图。")
         lines += ["", "## 自动发现的人类示范（无需手动选择）", ""]
         demonstrations = self.demonstrations(limit=13)
         for item in demonstrations[:12]:
@@ -123,8 +162,10 @@ class TaskMemory:
             lines.append('更多示范由 planning-context 自动分页查看，不需要手动选择参考。')
         lines += [
             "",
-            "复用评估：instruction / objects / scene / arm_roles / start_state / backend / grasp / completion / reference_limits。",
-            "证据变更/缺失、过期或参考导致失败：先失效移除，再从新成功证据修订，不能保留失败路线。",
+            "复用评估：" + " / ".join(REUSE_CHECKS) + "。",
+            "- 腕部辅助视角：" + PLANNING_FOCUS["observation_views"],
+            "- 抓夹深度：" + PLANNING_FOCUS["grasp_depth"],
+            "清理运行记录不删除经验。结论被推翻、参考过时/到期或导致失败时修正或移除；不保留失败路线。",
         ]
         (self.directory / "task_maps.md").write_text("\n".join(lines) + "\n")
 
@@ -157,6 +198,7 @@ class TaskMemory:
                     source=source,
                     title=data.get("title") or data.get("task") or path.name,
                     description=data.get("description", ""),
+                    limitations=data.get("limitations", ""),
                     task=data.get("task", ""),
                     tags=data.get("task_tags", []),
                     mode=data["mode"],
@@ -188,7 +230,7 @@ class TaskMemory:
                 raise ValueError(field + " must explicitly describe applicability")
             for item in graph[field]:
                 sentence(item, field)
-        paths, cases = set(), set()
+        cases = set()
         if not 1 <= len(graph["cases"]) <= MAX_CASES:
             raise ValueError("a map requires 1–8 reviewed successful cases")
         for case in graph["cases"]:
@@ -196,16 +238,14 @@ class TaskMemory:
             if key in cases:
                 raise ValueError("duplicate case")
             cases.add(key)
-            source = self.document(case["source"])
-            paths.add(case["source"])
-            if (
-                source.get("simulated")
-                or source.get("task_completed") is False
-                or source.get("success") is False
-                or source.get("outcome") in ("failure", "failed", "incomplete", "unknown", "pending")
-                or source.get("error")
-            ):
-                raise ValueError("failed/incomplete/simulated cases cannot support a map")
+            for field in ("summary", "reflection"):
+                sentence(case.get(field), "case " + field)
+            if not isinstance(case.get("limitations"), list) or not case["limitations"]:
+                raise ValueError("case limitations must describe the limits of the conclusion")
+            for limitation in case["limitations"]:
+                sentence(limitation, "case limitation")
+            if case["kind"] not in ("robot_task", "human_objects", "human_teleop"):
+                raise ValueError("unknown success case kind")
             review = case["review"]
             if review.get("outcome") != "success" or review.get("basis") not in (
                 "user_confirmation",
@@ -213,15 +253,11 @@ class TaskMemory:
             ):
                 raise ValueError("success needs explicit physical outcome review")
             sentence(review["statement"], "success statement")
-            evidence = review.get("evidence", [])
-            if not evidence:
-                raise ValueError("success needs evidence beyond a clean trace/closed recording")
-            paths.update(evidence)
             checks = review.get("result_checks", {})
-            if not checks or any(
-                key not in source or source[key] != expected for key, expected in checks.items()
-            ):
-                raise ValueError("success criteria do not match source result")
+            if not isinstance(checks, dict) or not checks:
+                raise ValueError("success needs explicit physical result checks")
+            if self.unsuccessful(checks):
+                raise ValueError("failed/incomplete/simulated cases cannot support a map")
             if not set(checks) - {
                 "closed",
                 "stop_confirmed",
@@ -230,22 +266,6 @@ class TaskMemory:
                 "error",
             }:
                 raise ValueError("file closure or stopping alone is not task success")
-            if case["kind"] in ("human_objects", "human_teleop"):
-                if (
-                    source.get("kind") != "human_demonstration"
-                    or source.get("mode") != case["kind"]
-                    or not source.get("closed")
-                    or source.get("outcome") != "success"
-                    or source.get("outcome_basis") not in ("visual_review", "user_confirmation")
-                    or not source.get("outcome_evidence")
-                ):
-                    raise ValueError("human demonstrations need a reviewed successful outcome")
-                paths.update(source["outcome_evidence"])
-                for camera in ("top", "left_wrist", "right_wrist"):
-                    video = str((Path(case["source"]).parent / (camera + ".mp4")))
-                    paths.add(video)
-            elif case["kind"] != "robot_task":
-                raise ValueError("unknown success case kind")
         nodes = set()
         if not 1 <= len(graph["nodes"]) <= MAX_NODES or len(graph["edges"]) > MAX_NODES * 2:
             raise ValueError("task map node/edge budget exceeded")
@@ -254,13 +274,10 @@ class TaskMemory:
             if key in nodes:
                 raise ValueError("duplicate node")
             nodes.add(key)
-            for field in ("operation", "preconditions", "completion", "adaptation"):
-                sentence(node[field], field)
+            for field in ("operation", "preconditions", "completion", "adaptation", "reflection"):
+                sentence(node.get(field), field)
             if not node.get("case_ids") or not set(node["case_ids"]) <= cases:
                 raise ValueError("every node requires successful case provenance")
-            if not node.get("evidence"):
-                raise ValueError("every node requires observed evidence")
-            paths.update(node["evidence"])
             if "reference_state" in node:
                 reference = node["reference_state"]
                 if reference.get("reference_only") is not True or reference.get("arm") not in (
@@ -269,7 +286,6 @@ class TaskMemory:
                     "both",
                 ):
                     raise ValueError("recorded state is reference-only, never an executable waypoint")
-                paths.add(reference["source"])
                 if "joints_deg" in reference and (
                     len(reference["joints_deg"]) != 6
                     or not all(
@@ -291,11 +307,64 @@ class TaskMemory:
             not isinstance(expiry, (int, float)) or not math.isfinite(expiry) or expiry <= self.clock()
         ):
             raise ValueError("task map expired")
-        return {path: self.fingerprint(path) for path in sorted(paths)}
+
+    @staticmethod
+    def unsuccessful(result):
+        return (
+            result.get("simulated")
+            or result.get("task_completed") is False
+            or result.get("success") is False
+            or result.get("outcome") in ("failure", "failed", "incomplete", "unknown", "pending")
+            or result.get("error")
+        )
+
+    def review_sources(self, graph):
+        """Optional run import: cross-check once, then discard all file links.
+
+        Inline reviews are authored by Codex after observing a real outcome.
+        Structural validation cannot independently establish physical success.
+        """
+        paths = set()
+        for case in graph["cases"]:
+            if "source" not in case:
+                if case["review"].get("evidence"):
+                    raise ValueError("run evidence import needs a source result")
+                continue
+            source = self.document(case["source"])
+            if self.unsuccessful(source):
+                raise ValueError("failed/incomplete/simulated cases cannot support a map")
+            review = case["review"]
+            if not review.get("evidence"):
+                raise ValueError("success needs a physical outcome review before run import")
+            paths.update(review["evidence"])
+            if any(k not in source or source[k] != v for k, v in review["result_checks"].items()):
+                raise ValueError("success criteria do not match source result")
+            if case["kind"] in ("human_objects", "human_teleop"):
+                if (
+                    source.get("kind") != "human_demonstration"
+                    or source.get("mode") != case["kind"]
+                    or not source.get("closed")
+                    or source.get("outcome") != "success"
+                    or source.get("outcome_basis") not in ("visual_review", "user_confirmation")
+                    or not source.get("outcome_evidence")
+                ):
+                    raise ValueError("human demonstrations need a reviewed successful outcome")
+                paths.update(source["outcome_evidence"])
+                for camera in ("top", "left_wrist", "right_wrist"):
+                    paths.add(str(Path(case["source"]).parent / (camera + ".mp4")))
+        for node in graph["nodes"]:
+            paths.update(node.get("evidence", []))
+            source = node.get("reference_state", {}).get("source")
+            if source is not None:
+                paths.add(source)
+        for path in paths:
+            self.artifact(path)
 
     def put(self, graph):
         graph = copy.deepcopy(graph)
-        fingerprints = self.validate(graph)
+        self.validate(graph)
+        self.review_sources(graph)
+        self.distill(graph)
         with self.edit() as state:
             old = next((m for m in state["maps"] if m["id"] == graph["id"]), None)
             if old is None and len(state["maps"]) >= MAX_MAPS:
@@ -303,7 +372,6 @@ class TaskMemory:
             graph.update(
                 revision=old["revision"] + 1 if old else 1,
                 updated_at=self.clock(),
-                fingerprints=fingerprints,
                 reference_only=True,
             )
             state["maps"] = [m for m in state["maps"] if m["id"] != graph["id"]] + [graph]
@@ -311,13 +379,12 @@ class TaskMemory:
         return graph
 
     def stale(self, graph):
-        if graph.get("valid_until") is not None and graph["valid_until"] <= self.clock():
-            return "outdated"
         try:
-            if self.validate(graph) != graph["fingerprints"]:
-                return "source_changed"
+            if graph.get("valid_until") is not None and graph["valid_until"] <= self.clock():
+                return "outdated"
+            self.validate(graph)
         except (OSError, ValueError, KeyError, TypeError):
-            return "source_changed"
+            return "invalid"
         return None
 
     def remove(self, state, key, reason, explanation):
@@ -338,6 +405,11 @@ class TaskMemory:
 
     def compact(self):
         with self.edit() as state:
+            # Older reviews did not assess wrist visibility or insertion depth.
+            state["assessments"] = [
+                a for a in state["assessments"]
+                if set(a.get("checks", {})) == set(REUSE_CHECKS) and a["expires_at"] > self.clock()
+            ]
             for graph in list(state["maps"]):
                 reason = self.stale(graph)
                 if reason:
@@ -345,7 +417,7 @@ class TaskMemory:
                         state,
                         graph["id"],
                         reason,
-                        "Evidence missing/changed, unsuccessful, or expired; re-review required.",
+                        "Stored conclusion invalid or explicitly expired; re-review required.",
                     )
 
     def assess(self, key, review):
@@ -391,7 +463,7 @@ class TaskMemory:
                 raise ValueError('assessment requires valid SDK joint/pose feedback')
         checks = review.get("checks", {})
         if set(checks) != set(REUSE_CHECKS):
-            raise ValueError("review every instruction/scene/backend applicability dimension")
+            raise ValueError("review every applicability dimension: " + ", ".join(REUSE_CHECKS))
         verdicts = []
         for check in checks.values():
             if check["verdict"] not in ("pass", "adapt", "reject"):
@@ -468,11 +540,14 @@ class TaskMemory:
             instruction=instruction,
             scene_id=scene_id,
             reference_only=True,
+            reuse_checks=list(REUSE_CHECKS),
+            planning_focus=copy.deepcopy(PLANNING_FOCUS),
             maps=result,
             demonstrations=demonstrations[:32],
             next_demo_offset=demo_offset+32 if len(demonstrations) > 32 else None,
             workflow="Codex automatically reads candidates, examines all views, names/describes and "
-            "reviews pending demos; only successful cases support maps. Reassess the new "
+            "reviews pending demos; distill successful cases into self-contained facts, reflections, "
+            "strategies and limits. Run cleanup does not invalidate learned summaries. Reassess the new "
             "instruction/scene before reuse and after meaningful changes; never replay.",
         )
 

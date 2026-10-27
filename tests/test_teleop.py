@@ -159,11 +159,19 @@ def test_invalid_keys(value):
         keyset(value)
 
 
-@pytest.mark.parametrize('values', [{'input_timeout_s': 1}, {'speed_percent': 100},
+@pytest.mark.parametrize('values', [{'input_timeout_s': 1}, {'speed_percent': 101},
     {'translation_m_s': float('nan')}, {'control_hz': True}, {'speed_percent': 1.5}])
 def test_invalid_policy(values):
     with pytest.raises(ValueError):
         Policy(**values)
+
+
+@pytest.mark.parametrize('profile', ['slow', 'normal', 'fast'])
+def test_commanded_speed_has_no_application_ceiling(profile):
+    from dataclasses import replace
+    policy = replace(Policy().for_speed(profile), translation_m_s=.3,
+                     rotation_deg_s=90., gripper_m_s=.05, speed_percent=100)
+    assert policy.translation_m_s == .3 and policy.speed_percent == 100
 
 
 class MemoryTrace:
@@ -1832,7 +1840,7 @@ def test_manual_profile_limits_preserve_joint_motion_guards(profile, hz, speed, 
     assert p.geometry_timeout_s < 1/p.control_hz
 
 
-@pytest.mark.parametrize('values', [{'translation_m_s': .1}, {'position_lead_m': .008},
+@pytest.mark.parametrize('values', [{'position_lead_m': .008},
     {'control_hz': 50, 'geometry_timeout_s': .018}, {'joint_lead_deg': 6}])
 def test_normal_profile_cannot_borrow_fast_following_budget(values):
     with pytest.raises(ValueError):
@@ -1879,7 +1887,7 @@ def test_release_displacement_is_recorded_without_distance_limit(controller, mon
 
 @pytest.mark.parametrize('field,value', [('input_timeout_s', .101), ('geometry_timeout_s', .019),
     ('joint_lead_deg', 6.01), ('position_lead_m', .0081),
-    ('translation_m_s', .1001), ('joint_acceleration_deg_s2', 120.1)])
+    ('joint_acceleration_deg_s2', 120.1)])
 def test_fast_profile_cannot_exceed_declared_motion_and_stop_caps(field, value):
     from dataclasses import replace
     fast = Policy(ik_solver='casadi_ipopt').for_speed('fast')

@@ -1,23 +1,35 @@
-# 自动任务记忆、元操作节点与地图
+# 反思总结、元操作节点与任务地图
+
+长期 Memory 保存能独立读懂的经验：当时发生了什么、为什么这样调整、哪些原因只是推断、下次如何判断和行动、什么条件下不适用。节点关联 Memory 内的案例总结，不指向 `runs/` 中的图片、日志或结果文件。运行材料用于当次观察和复核，清理材料不会删除已总结的经验；文件存在本身也不证明经验正确。
 
 Codex 开始每个任务或继续中断任务时，先读 Memory 三页和 `task_maps.md`，再以新输入指令运行 `operation_memory planning-context`。这会自动发现本机所有完整真实示范和成功案例地图，不依赖示范面板的手动选择。候选每页最多32条；返回 `next_demo_offset` 时由Codex用 `--demo-offset` 继续查看相关旧示范，不能把第一页当成全部历史。保存新示范会刷新索引；名称或描述缺失、结果未复核的示范自动列为待分析。分析和推理由当前 Codex 完成，录制器不在后台启动模型，也不把录像正常保存当成任务成功。
 
 ## 主动维护流程
 
-1. 自动查看相关候选、历史完成条件和适用边界。对待分析示范导出并查看三路关键帧；均匀抽帧不足时查看连续关键阶段。生成清楚的标题、任务、动作顺序、描述、标签、观察范围及遮挡/失败边界，标明 Codex 分析来源。只改显示名称，保留目录 ID 和旧证据路径。
+1. 自动查看相关候选、历史完成条件和适用边界。对待分析示范导出并查看三路关键帧；均匀抽帧不足时查看连续关键阶段。生成清楚的标题、任务、动作顺序、描述、标签、观察范围及遮挡/失败边界，标明 Codex 分析来源。保留示范目录 ID；需要长期复用的内容提炼进 Memory，不能只留素材路径。
 2. 复核成功：以真实 RGB/SDK 或当次用户确认验证任务的完成条件。人工遥控成功案例同样可用。未知、未完成、失败、模拟或仅停止/文件收尾正常，均不能支持地图。人手示范中闲置机械臂的关节反馈不是人的动作轨迹，不为此建立机器人关节节点。
-3. 将成功案例抽象为元操作节点：操作意图、前置条件、完成判据、观察证据、动态调整条件及案例来源。按需要配备文本、三路视觉/视频时段和 SDK 关节/夹爪/末端状态；这些数值只能作为参考，不生成可执行航点或按键脚本。节点之间的连接也必须有同一成功案例支持，不能拼出未成功验证的路线。
-4. 针对新指令及现场，逐项评估目标、物体、场景、双臂分工、起姿、控制后端、抓持、完成条件、旧案例限制，写明通过/调整/拒绝及原因。使用最近60秒的三路图像和双臂反馈，检查时间戳。每次有效场景/指令变化重新评估；执行前仍观察最新 RGB 和反馈，短期复用评估不是运动许可。
-5. 执行中按实际可见状态推进节点，动态调整抓点、视角、路径和节奏，不照抄旧坐标、力或时长。新调整在当前任务评估中记录；只有新的真实成功证据才能提升为长期地图版本。失败进入问题记忆，不将失败节点/路线存入成功地图。
-6. 旧参考导致失败时立即 `invalidate --reason reference_failure`，删除地图和复用评估，只保留简短失效原因。证据丢失/更改、成功标签撤销和到期由 `compact` 自动移除；过时但证据仍在的地图由 Codex 主动复核、修正或移除。修正必须重新关联成功证据，不能把失败补丁包装为成功经验。
+3. 先将案例写成自包含的事实摘要、反思、成功复核结论和适用边界，再抽象为节点：操作意图、前置条件、完成判据、策略反思、动态调整规则。反思回答“为何采用此策略、可观察到什么、哪些解释尚未验证”，不能只是文件清单或动作流水账。节点和连接用稳定案例 ID 关联这些总结，连接须有同一真实成功案例支持，不能拼出未成功验证的路线。必要的 SDK 参考值可内嵌并说明含义/限制，不依赖原文件、不生成可执行航点或按键脚本。
+4. 针对新指令及现场，逐项评估目标、物体、场景、双臂分工、起姿、控制后端、观察视角、抓持、抓夹深度、完成条件、旧案例限制，写明通过/调整/拒绝及原因。使用最近60秒的三路图像和双臂反馈，检查时间戳。每次有效场景/指令变化重新评估；执行前仍观察最新 RGB 和反馈，短期复用评估不是运动许可。
+5. 执行中按实际可见状态推进节点，动态调整抓点、视角、路径和节奏，不照抄旧坐标、力或时长。新调整在当前任务评估中记录；新增成功策略须经当次真实结果复核，再总结入图。可以基于已有事实澄清反思和边界，但不算新增实机成功。失败的原因、教训和待验证改进进入问题记忆，不将失败路线存入成功地图。
+6. 旧参考导致失败时立即 `invalidate --reason reference_failure`，删除地图和复用评估，只保留简短失效原因。确认原成功判定错误用 `success_revoked` 主动撤销；过时参考主动修正或移除。`compact` 只因总结结构失效或显式复核期限到期移除地图，不读取、比对或要求历史运行文件存在。文件被清理或覆盖不等于结论被推翻，反思修订也不要求重建原文件。
+7. 清理运行材料前确认必要事实、反思、可复用策略、未知处与适用边界已写入 Memory；尚未分析的材料不能因只存了路径就当作已总结。清理范围按当次指令决定，地图不再构成素材保留依赖。
 
 这是有界经验维护，不是模型权重训练；不宣称规划提速或成功率提升已经测得。
+
+## 腕部辅助视角与抓夹深度（每次规划重点）
+
+- `observation_views`：不能只确认三路图像存在。逐阶段说明顶视、操作腕、另一腕实际看清的部位与遮挡；未选中臂的腕相机也主动查看。顶视用于平面布局，腕部近视看双指与物体关系，可用的另一腕侧视补高度、接触、底部承托或瓶口/杯沿、水流/残滴。另一腕也可能被自身持物挡住，不把三路齐全写成关键部位可见。
+- `grasp_depth`：闭爪前检查物体沿进夹方向进入双指的程度、两侧接触区域、夹持高度和指尖到桌面/邻物间隙；明确是否只夹到指尖边缘。深度与开度、TCP高度分别判断，不盲推到底，不把越深越好作为通则；按物体有效可夹区域重新选抓点，瓶身、球头、筒身不能互套。
+- 在抓前、低位试提/短移后、倾倒/插入前、释放前再次查看相关腕视角，比较物体相对双指是否滑移/转动。关键部位遮挡或深度未知先暂停、补观察，再决定是否重夹；重夹先确认当次承托。调整观察臂取景仍遵循普通真机动作要求，不能因取景直接发送旧关节目标。
+- 评估 `reason` 写清对应视角/帧、可见接触关系和未知处；看不清不能写 `pass`，需要补视角/重夹时写 `adapt` 并给出调整，当前无法判定则 `reject`。不涉及抓持的节点在深度项明确写不适用及原因；这不是对后续抓持节点的预先通过。
+- 分析示范同样记录夹前、接触、试提、搬运/倾倒、释放阶段的可见关系和遮挡。未标定RGB不能给出毫米夹深；开度、effort、SDK末端或已提起均不能单独证明足够夹深或保持力。新要求是规划检查，历史成功若未测深度就保留未知，不补写为已验证深夹成功。
 
 ## 本机数据与边界
 
 - `docs/memory/task_maps.json` 保存最多8组地图，每组最多24节点、48连接和8个成功案例。只存必要信息；每次修正递增版本并清除旧复用评估。
 - `task_maps.md` 是自动生成的短索引，也列出待分析和成功人类示范。Memory 每页100行、合计260行的限制继续执行；完整图和素材不复制进摘要页。
-- 最多保留24份短期复用评估和16条失效原因，不保留被移除的失败图。新指令、场景ID、地图版本、证据指纹或有效期不一致，返回 `assessment_required`。不同场景拒绝某图不会把该图本身当成失败，仍可能适用于原场景。
+- 最多保留24份短期复用评估和16条失效原因，不保留被移除的失败图。新指令、场景ID、地图版本、当次现场材料指纹或有效期不一致，返回 `assessment_required`。不同场景拒绝某图不会把该图本身当成失败，仍可能适用于原场景。现场评估可以依赖短期文件；清理这些文件仅使评估需要重做，不删除长期地图。
+- 存储版本为2。旧版图自动去除文件链接和指纹、保留原结论并清空旧评估；旧版未总结的原因明确标为未验证，不凭迁移补造经验。Codex随后按已有事实补充有用反思。
 - 数据和原始示范仅存本机；公开仓库发布维护逻辑、文档和测试，不发布私有图、相机素材或控制日志。
 - 该模块没有运动发送入口。原生/本地后端的既有停止、输入、健康、反馈及各自检查范围继续生效。
 
@@ -25,7 +37,7 @@ Codex 开始每个任务或继续中断任务时，先读 Memory 三页和 `task
 
 ```bash
 python -m astra_vla.operation_memory planning-context --instruction '本次完整指令'
-python -m astra_vla.task_memory put runs/当前维护/成功地图.json
+python -m astra_vla.task_memory put /tmp/成功地图总结.json
 python -m astra_vla.task_memory assess 地图ID runs/当前任务/复用评估.json
 python -m astra_vla.operation_memory planning-context --instruction '本次完整指令' --scene-id 本次现场ID
 python -m astra_vla.task_memory invalidate 地图ID --reason reference_failure --explanation '参考导致失败的观察和范围'
@@ -33,13 +45,17 @@ python -m astra_vla.operation_memory compact
 python scripts/check_robot_memory.py
 ```
 
-地图 JSON 的必需字段：`id/name/task/description`，`scene_assumptions/success_criteria/non_transferable` 文本列表，`cases/nodes/edges`。路径均相对仓库根，必须存在于仓库内。可用 `valid_until` 设置复核期限。
+地图 JSON 的必需字段：`id/name/task/description`，`scene_assumptions/success_criteria/non_transferable` 文本列表，`cases/nodes/edges`。长期地图无需运行文件路径；可用 `valid_until` 显式设置复核期限。
 
-案例：`id/kind/source/review`。`kind` 为 `robot_task/human_objects/human_teleop`；`source` 指结果 JSON 或 `demonstration.json`。`review` 需要 `outcome=success`、`basis=visual_review/user_confirmation`、`statement/evidence/result_checks`；检查字段必须与源结果一致且不能只有停止/收尾。人类示范源本身也须已复核成功，三路录像存在。案例声明仍需 Codex 实际看证据，结构校验不是对视觉结论的独立验证。
+案例：`id/kind/summary/reflection/limitations/review`。`kind` 为 `robot_task/human_objects/human_teleop`；`summary` 写场景、关键调整与实际结果，`reflection` 区分教训与原因推断，`limitations` 是非空文本列表。`review` 需要 `outcome=success`、`basis=visual_review/user_confirmation`、`statement/result_checks`；检查字段保存当时完成条件的实际结果，不能只有停止/收尾。由 Codex 对真实操作复核后撰写，结构校验不独立证明视觉结论。
 
-节点：`id/operation/preconditions/completion/adaptation/case_ids/evidence`；按需增加角色和文本/视觉描述。`reference_state` 可含 `source/arm/joints_deg/gripper/sdk_ee_pose` 等参考信息，但必须标记 `reference_only=true`。连接：`from/to/condition/case_ids`，来源案例须同时支持两个端点。
+节点：`id/operation/preconditions/completion/reflection/adaptation/case_ids`；按需增加角色及可见关系的文字描述。`reference_state` 可内嵌 `arm/joints_deg/gripper/sdk_ee_pose/description`，必须标记 `reference_only=true`。连接：`from/to/condition/case_ids`，关联的持久案例总结须同时支持两个端点。
 
-复用评估：`instruction/scene_id/observed_at/scene_snapshot/scene_evidence/checks`。`scene_snapshot` 使用现有观察 JSON 的 `cameras` 和 `robot.arms`；相机三路都新鲜、双臂反馈新鲜。`scene_evidence` 为三路名称到对应图像的映射。`checks` 的9项对应上面的评估维度，每项包含 `verdict=pass/adapt/reject` 和 `reason`；有调整必须提供 `adjustments` 文本列表，可用 `node_id` 表示当前节点。评估结果取最严格一项，且只对该指令、现场和地图版本短期有效。
+兼容一次性运行材料导入：提交时可附案例 `source` 和 `review.evidence`、节点 `evidence` 或参考状态 `source`，这些路径须相对仓库根并存在；接口校验源结果与成功复核一致，人类示范须已复核成功且三路录像完整。仍须填写反思总结。保存时移除这些链接及历史文件指纹，后续规划、整理和修订均不依赖它们。
+
+例如“多视角倒水”应留下：左腕确实看见入杯水流，用户确认当次无新增洒水；反思是把对位判断拆成平面位置、侧视高度和实际落点，在杯上方复核断滴后再撤。辅助视角有利于判读是机制推断，单次案例未分离各因素贡献，不能推广零洒漏，也未标定夹深。节点保存这些判断和调整条件即可，不需要指向那次照片才能理解。
+
+复用评估：`instruction/scene_id/observed_at/scene_snapshot/scene_evidence/checks`。`scene_snapshot` 使用现有观察 JSON 的 `cameras` 和 `robot.arms`；相机三路都新鲜、双臂反馈新鲜。`scene_evidence` 为三路名称到对应图像的映射。`checks` 的11项由 planning-context 的 `reuse_checks` 列出，含独立必填的 `observation_views` 与 `grasp_depth`，每项包含 `verdict=pass/adapt/reject` 和 `reason`；有调整必须提供 `adjustments` 文本列表，可用 `node_id` 表示当前节点。旧9项评估自动清除并要求重评，不因此删除成功地图。`planning_focus` 即使没有地图/示范也返回这两项检查要求。结构校验不能代替Codex视觉判断。评估结果取最严格一项，且只对该指令、现场和地图版本短期有效。
 
 ## 每段长按后的实读反馈
 

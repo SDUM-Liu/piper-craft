@@ -83,8 +83,7 @@ class Policy:
             raise ValueError('unknown teleop vertical frame/IK solver')
         maxima = dict(control_hz=50 if fast else 20,
                       input_timeout_s=.1 if fast else .25, geometry_timeout_s=.018 if fast else .05,
-                      translation_m_s=.1 if fast else .02, rotation_deg_s=10, gripper_m_s=.01,
-                      gripper_effort=.8, speed_percent=20, position_lead_m=.008 if fast else .002,
+                      gripper_effort=.8, speed_percent=100, position_lead_m=.008 if fast else .002,
                       rotation_lead_deg=.5, gripper_opening_lead_m=.003,
                       joint_acceleration_deg_s2=120, joint_lead_deg=6 if fast else 2, tcp_drift_m=.002)
         for field in fields(self):
@@ -93,7 +92,9 @@ class Policy:
             value = getattr(self, field.name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError('teleop policy must contain finite numbers: ' + field.name)
-            if not 0 < value <= maxima[field.name]:
+            # Commanded rates have no application-level overspeed ceiling.
+            # SDK percentage still has its protocol range; motion guards stay.
+            if not 0 < value <= maxima.get(field.name, math.inf):
                 raise ValueError('teleop policy outside permitted range: ' + field.name)
         if int(self.speed_percent) != self.speed_percent or self.gripper_effort < .1:
             raise ValueError('invalid teleop speed/effort')
