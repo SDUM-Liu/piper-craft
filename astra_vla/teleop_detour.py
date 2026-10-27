@@ -62,37 +62,13 @@ def endpoint_intent(state, tcp, policy, keys, maximum_width, horizon):
     return goal
 
 
-def route_samples(start, goal, step_deg=.1):
-    count = max(1, math.ceil(float(np.max(np.abs(np.rad2deg(goal-start))))/step_deg))
-    for fraction in np.linspace(0, 1, count+1):
-        yield start+fraction*(goal-start)
-
-
-def check_joint_route(model, state, start, goal, envelope, *, deadline=None, corners=True):
-    """Sample self geometry and independent-axis corners; external world is unmodeled."""
-    checked = 0
-    def check(joints):
-        nonlocal checked
-        if deadline is not None and time.monotonic() >= deadline:
-            raise TimeoutError('detour geometry deadline exceeded')
-        checked += 1
-        q = model.configuration(dict(state, joints_rad=joints.tolist()))
-        if model.bounded_gripper_collision(q, envelope):
-            raise ValueError('detour path has URDF self collision')
-    for joints in route_samples(start, goal):
-        check(joints)
-    if corners:
-        count = max(1, math.ceil(float(np.max(np.abs(np.rad2deg(goal-start))))))
-        for index in range(count):
-            first = start+(goal-start)*index/count
-            second = start+(goal-start)*(index+1)/count
-            active = np.flatnonzero(np.abs(second-first) > 1e-12)
-            for mask in itertools.product((False, True), repeat=len(active)):
-                corner = first.copy()
-                selected = active[np.asarray(mask, dtype=bool)]
-                corner[selected] = second[selected]
-                check(corner)
-    return checked
+def validate_joint_route(start, goal, *, deadline=None):
+    """Validate joint data and deadline; no local path collision checking."""
+    start, goal = np.asarray(start, dtype=float), np.asarray(goal, dtype=float)
+    if start.shape != (6,) or goal.shape != (6,) or not np.isfinite([start, goal]).all():
+        raise ValueError('invalid joint route')
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('detour geometry deadline exceeded')
 
 
 class EndpointSolver:
@@ -175,14 +151,15 @@ def plan_detour(model, state, target_tcp, geometry, options):
         candidates.append((float(np.linalg.norm(goal-start)), goal))
     for _, goal in sorted(candidates, key=lambda item: item[0]):
         try:
-            samples = check_joint_route(model, state, start, goal, envelope, deadline=deadline)
+            validate_joint_route(start, goal, deadline=deadline)
         except ValueError:
             continue
         return {'start_joints_rad': start.tolist(), 'goal_joints_rad': goal.tolist(),
-                'target_tcp': target.tolist(), 'envelope_max_m': envelope, 'samples': samples,
-                'solver': 'casadi_ipopt', 'scope': 'robot_only',
+                'target_tcp': target.tolist(), 'envelope_max_m': envelope, 'samples': 0,
+                'solver': 'casadi_ipopt', 'scope': 'none', 'path_precheck': 'none',
+                'path_collision_check': False,
                 'environment_guard': False, 'other_arm_guard': False}
-    raise ValueError('没有找到终点可达且自身几何检查通过的绕行路径')
+    raise ValueError('没有找到终点可达的关节过渡路径')
 
 
 def detour_joint_step(model, state, plan, policy, previous_goal, previous_velocity, validated=None):
@@ -192,6 +169,8 @@ def detour_joint_step(model, state, plan, policy, previous_goal, previous_veloci
     previous = np.asarray(current if previous_goal is None else previous_goal)
     velocity = np.asarray(previous_velocity)
     goal = np.asarray(plan['goal_joints_rad'])
+    validate_joint_route(current, goal)
+    validate_joint_route(previous, velocity)
     acceleration_step = math.radians(policy['joint_acceleration_deg_s2'])*dt
     lead = math.radians(policy['joint_lead_deg'])
     if validated is None:
@@ -208,8 +187,7 @@ def detour_joint_step(model, state, plan, policy, previous_goal, previous_veloci
             return None
         # Preserve incoming momentum. Steer each joint toward its endpoint
         # through the existing acceleration box instead of resetting velocity
-        # or requiring a stationary handoff. Fresh collision checking covers
-        # the actual blended step, even when it departs from the preview line.
+        # or requiring a stationary handoff. This is not collision avoidance.
         desired = np.sign(delta)*(np.sqrt(acceleration_step**2+2*acceleration*np.abs(delta))-acceleration_step)
         desired = np.sign(desired)*np.minimum(np.abs(desired), np.abs(delta)/dt)
         new_velocity = np.clip(desired, low, high)
@@ -224,10 +202,9 @@ def detour_joint_step(model, state, plan, policy, previous_goal, previous_veloci
         raise ValueError('detour tracking lead exceeded')
     if np.max(np.abs(new_velocity-velocity)) > acceleration_step+1e-10:
         raise ValueError('detour acceleration exceeded')
-    # Validate the fresh feedback-to-command path, including independent axes.
-    samples = check_joint_route(model, state, current, target, plan['envelope_max_m'],
-                               deadline=time.monotonic()+policy['geometry_timeout_s'])
+    validate_joint_route(current, target)
     q = model.configuration(dict(state, joints_rad=target.tolist()))
     tcp = model.placement(q).homogeneous
     return {'joint_sdk': np.rint(np.rad2deg(target)*1000).astype(int).tolist(),
-            'velocity': new_velocity.tolist(), 'samples': samples, 'tcp_target': tcp.tolist()}
+            'velocity': new_velocity.tolist(), 'samples': 0, 'tcp_target': tcp.tolist(),
+            'path_precheck': 'none', 'path_collision_check': False}

@@ -58,7 +58,7 @@ def geometry_step(*args):
 
 
 def geometry_recheck(*args):
-    """Recheck the integer endpoint and full path without repeating IPOPT."""
+    """Recheck the integer endpoint and motion budgets without repeating IPOPT."""
     return _geometry_model.teleop_step(*args[:-1], validated_goal=args[-1])
 
 
@@ -386,11 +386,11 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                     'vertical_frame': self.policy.vertical_frame if hasattr(self, 'policy') else None,
                     'ik_solver': ('sleep_joint_return' if sleep_joint else 'joint_jog' if joint_jog else 'controller' if self.native_control else
                                   self.policy.ik_solver if hasattr(self, 'policy') else None),
-                    'path_precheck': 'none' if self.native_control else 'full_joint_path',
+                    'path_precheck': 'none', 'path_collision_check': False,
                     'follow_mode': self.policy.follow_mode if hasattr(self, 'policy') else None,
                     'sdk_speed_percent_effective': True if hasattr(self, 'policy') else None,
                     'mode_feedback_verified': False,
-                    'collision_scope': 'none' if self.native_control else 'robot_only',
+                    'collision_scope': 'none' if self.native_control else 'entry_hold_only',
                     'joint_position_limits': 'controller',
                     'environment_guard': False, 'other_arm_guard': False,
                     'blocker': self.reason, 'termination_reason': getattr(self, 'termination_reason', None),
@@ -627,8 +627,8 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                         'automatic_orientation': bool(self.native_control and not self.native_pose_probe),
                         'controller_limits': ({key: self.native_limits[key] for key in ('source', 'complete', 'limits')}
                                               if self.native_control and not self.native_pose_probe else None),
-                        'path_precheck': 'none' if self.native_control else 'full_joint_path',
-                        'collision_scope': 'none' if self.native_control else 'robot_only',
+                        'path_precheck': 'none', 'path_collision_check': False,
+                        'collision_scope': 'none' if self.native_control else 'entry_hold_only',
                         'joint_position_limits': 'controller',
                         'environment_guard': False, 'other_arm_guard': False,
                         'configuration_token': self.token}
@@ -1270,7 +1270,7 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                         if (residual <= np.deg2rad(.05) and
                                 stroke[0] - 5e-7 <= latest['gripper']['width_m'] <= stroke[1] + 5e-7):
                             # Same 0.05 degree start tolerance, now compared
-                            # against an already checked point on this exact
+                            # against an interpolated point on this exact
                             # path. Expected progress is not a stale start.
                             self.trace.record('validated_progress', generation=generation,
                                               residual_deg=float(np.rad2deg(residual)), latest=latest)
@@ -1389,6 +1389,7 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
             self.trace.record('target', generation=generation, keys=sorted(keys), joints_sdk=target,
                               width_m=proposal['width_m'], tcp_target=proposal['tcp_target'].tolist(),
                               state=before, geometry_samples=result['samples'], ik=result.get('ik'),
+                              path_precheck='none', path_collision_check=False,
                               joint_limit_status=result.get('joint_limit_status'),
                               gripper_envelope_mode=result.get('gripper_envelope_mode'),
                               gripper_envelope_max_m=result.get('gripper_envelope_max_m'),

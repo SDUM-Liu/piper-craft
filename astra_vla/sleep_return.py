@@ -1,11 +1,11 @@
-"""Configured sleep joint targets and offline path checks; no SDK access."""
+"""Configured sleep joint targets and finite-data validation; no SDK access."""
 import json
 import time
 
 import numpy as np
 
 from astra_vla.config import ROOT
-from astra_vla.teleop_detour import check_joint_route
+from astra_vla.teleop_detour import validate_joint_route
 
 
 def sleep_pose_path():
@@ -33,15 +33,15 @@ def load_sleep_target(arm):
 
 
 def plan_sleep_return(model, state, target, geometry, options):
-    """Check the fixed joint route, without deriving an SDK pose from FK."""
+    """Prepare the fixed joint route without local path collision checking."""
     start = np.asarray(state['joints_rad'], dtype=float)
     goal = np.asarray(target['goal_joints_rad'], dtype=float)
     if start.shape != (6,) or goal.shape != (6,) or not np.isfinite([start, goal]).all():
         raise ValueError('invalid sleep joint plan')
     width = max(state['gripper']['width_m'], geometry.get('unverified_gripper_max_m') or 0)
     envelope = min(.1, max(.001, np.ceil(width * 1000) / 1000))
-    samples = check_joint_route(model, state, start, goal, envelope,
-                               deadline=time.monotonic() + options['planning_timeout_s'])
+    validate_joint_route(start, goal, deadline=time.monotonic() + options['planning_timeout_s'])
     return {'start_joints_rad': start.tolist(), 'goal_joints_rad': goal.tolist(),
-            'envelope_max_m': float(envelope), 'samples': samples, 'kind': 'sleep',
-            'scope': 'robot_only', 'environment_guard': False, 'other_arm_guard': False}
+            'envelope_max_m': float(envelope), 'samples': 0, 'kind': 'sleep',
+            'scope': 'none', 'path_precheck': 'none', 'path_collision_check': False,
+            'environment_guard': False, 'other_arm_guard': False}

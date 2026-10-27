@@ -303,7 +303,7 @@ class Kinematics:
 
     def teleop_step(self, state, other_state, target, geometry, width, policy, previous_velocity,
                     previous_goal=None, validated_goal=None):
-        """Solve and check the exact MOVE J integers, including asynchronous finger travel.
+        """Solve and check exact MOVE J integers, acceleration and following budgets.
 
         This is an internal, single-use calculation. It exports no motion permission
         and never connects CAN. The owning worker rechecks feedback/input before TX.
@@ -424,37 +424,23 @@ class Kinematics:
         ) * dt + 1e-10:
             raise rate_rejection('teleop joint acceleration exceeds bound', velocity,
                                  previous_velocity, acceleration_step)
-        local_jog = True
         tcp = np.asarray(geometry['tcp'])
         actual_tcp, target_tcp = actual @ tcp, target @ tcp
         if not joint_jog and (np.linalg.norm(target_tcp[:3, 3] - actual_tcp[:3, 3]) > policy['position_lead_m'] or
                 np.linalg.norm(pin.log3(actual_tcp[:3, :3].T @ target_tcp[:3, :3])) >
                 math.radians(policy['rotation_lead_deg'])):
             raise ValueError('teleop TCP target exceeds tracking lead')
-        actual_width = max(0., float(state['gripper']['width_m']))
-        uncertain_max = geometry.get('unverified_gripper_max_m')
-        if uncertain_max is not None and not local_jog:
-            raise ValueError('unverified gripper is limited to manual arm control')
-        envelope_max = uncertain_max
-        if local_jog and self.gripper_model == 'piper' and actual_width-width > .001 and envelope_max is None:
-            # The same proven prismatic-finger sweep used for uncertain zero
-            # covers every opening, including a stalled jaw with a zero goal.
-            # Round outward to millimetres to bound the cached shape count.
-            envelope_max = math.ceil(max(actual_width, width)*1000)/1000
-        widths = ([actual_width] if envelope_max is not None else
-                  np.linspace(min(actual_width, width), max(actual_width, width),
-                              max(1, math.ceil(abs(width - actual_width) / .00025 - 1e-10) + 1)))
-        # Full Cartesian product: finger and arm controllers need not share timing.
+        actual_width = float(state['gripper']['width_m'])
+        if not math.isfinite(actual_width):
+            raise ValueError('invalid teleop gripper feedback')
+        actual_width = max(0., actual_width)
+        # Interpolation only supports feedback-progress accounting. Per user
+        # instruction it performs no path or finger-sweep collision queries.
         count = max(10, math.ceil(np.max(np.abs(goal[:6] - current[:6])) / math.radians(.1)))
         path_joints = []
         for fraction in np.linspace(0, 1, count + 1):
             candidate = pin.interpolate(self.model, current, goal, float(fraction))
             path_joints.append(candidate[:6].tolist())
-            for stroke in widths:
-                finger_state = {'joints_rad': candidate[:6], 'gripper': {'width_m': float(stroke)}}
-                q = self.configuration(finger_state)
-                if self.bounded_gripper_contacts(q, envelope_max):
-                    raise ValueError('teleop sampled path has URDF self collision')
         return {'reachable': True, 'joint_sdk': integers.tolist(), 'velocity': velocity.tolist(),
                 'tcp_target': target_tcp.tolist(),
                 # Advisory for endpoint replanning, not an ordinary-jog angle
@@ -462,12 +448,12 @@ class Kinematics:
                 'detour_recommended': not joint_jog and bool(np.any(goal[:6]+velocity < self.model.lowerPositionLimit[:6])
                                            or np.any(goal[:6]+velocity > self.model.upperPositionLimit[:6])),
                 'joint_limit_status': [], 'joint_position_limits': 'controller',
-                'ik': dict(validated_goal['ik'], fresh_path_rechecked=True) if validated_goal is not None else
+                'ik': dict(validated_goal['ik'], fresh_target_rechecked=True) if validated_goal is not None else
                       ({'solver': 'joint_jog', 'progress_fraction': float(
                           np.max(np.abs(goal[:6]-previous_goal)) > 1e-10)} if joint_jog else
                        dict(self.regularized_teleop_ik.last)),
-                'goal_joints_rad': goal[:6].tolist(), 'samples': (count + 1) * len(widths),
-                'gripper_envelope_mode': 'swept_box' if envelope_max is not None else 'sampled',
-                'gripper_envelope_max_m': envelope_max,
+                'goal_joints_rad': goal[:6].tolist(), 'samples': count + 1,
+                'path_precheck': 'none', 'path_collision_check': False,
+                'gripper_envelope_mode': 'none', 'gripper_envelope_max_m': None,
                 'path_joints_rad': path_joints,
                 'stroke_bounds_m': [min(actual_width, width), max(actual_width, width)]}

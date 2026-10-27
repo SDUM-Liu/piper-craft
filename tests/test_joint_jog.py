@@ -133,7 +133,7 @@ for profile in ('slow','normal','fast'):
    assert r['samples']>=11 and r['path_joints_rad'][0]==s['joints_rad']
    moved=dict(s,joints_rad=(np.array(s['joints_rad'])+delta*.4).tolist())
    check=k.teleop_step(moved,s,np.eye(4),g,.03,p,[0.]*6,validated_goal=r)
-   assert check['joint_sdk']==r['joint_sdk'] and check['ik']['fresh_path_rechecked']
+   assert check['joint_sdk']==r['joint_sdk'] and check['ik']['fresh_target_rechecked']
 assert s==original  # No replacement/comparison of SDK readback with FK.
 # Acceleration and following checks remain independent of the TCP pose budget.
 p=asdict(Policy.load())
@@ -153,10 +153,10 @@ for _ in range(50):
  assert np.max(np.abs(previous-s['joints_rad']))<=np.deg2rad(p['joint_lead_deg'])+1e-10
  if r['ik']['progress_fraction']==0:break
 else:raise AssertionError('joint jog failed to stop advancing into a stalled axis')
-k.bounded_gripper_contacts=lambda *a,**kw:{(1,5):.001}
-try:k.teleop_step(s,s,np.eye(4),g,.03,p,[0.]*6)
-except ValueError as e:assert 'path has URDF self collision' in str(e)
-else:raise AssertionError('joint jog bypassed collision guard')
+def collision(*a,**kw):raise AssertionError('joint jog queried path collision')
+k.bounded_gripper_contacts=collision
+r=k.teleop_step(s,s,np.eye(4),g,.03,p,[0.]*6)
+assert r['path_precheck']=='none' and not r['path_collision_check']
 ''')
 
 

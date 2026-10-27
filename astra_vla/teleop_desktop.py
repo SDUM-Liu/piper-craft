@@ -1166,6 +1166,9 @@ class Window:
             y += 22
             self.text('原生：无本地自碰撞检查', (x, y), (255, 220, 110), self.small)
             y += 22
+        if self.client.execution_backend != 'controller_move_p':
+            self.text('本地：无路径自碰撞检查', (x, y), (255, 220, 110), self.small)
+            y += 22
         self.keys_top = y+5
 
     def draw_keys(self):
@@ -1392,7 +1395,7 @@ class Window:
         right = ['Python: '+sys.version.split()[0]+' / SDL: '+'.'.join(map(str, pg.get_sdl_version())),
                  'Controller: '+str(telemetry.get('execution_backend', self.client.execution_backend) if telemetry.get('active') else self.client.execution_backend),
                  'IK: '+str(telemetry.get('ik_solver') or ('controller' if self.client.execution_backend == 'controller_move_p' else policy.get('ik_solver', '—'))),
-                 '检查: '+('无本地自碰撞检查' if self.client.execution_backend == 'controller_move_p' else '完整关节路径'),
+                 '检查: '+('无本地自碰撞检查' if self.client.execution_backend == 'controller_move_p' else '入口姿态检查；无路径自碰撞检查'),
                  'Control: '+str(telemetry.get('phase', 'observing'))+' / '+str(telemetry.get('owner') or '无控制者'),
                  'Status: '+('准备中…' if self.client.opening else phase_label),
                  'Stop: '+stop, '',

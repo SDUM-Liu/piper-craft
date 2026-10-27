@@ -37,7 +37,7 @@ assert speed>30, speed
 assert max(abs(np.array(r['velocity'])-v))<=np.deg2rad(p.joint_acceleration_deg_s2)/p.control_hz+1e-10
 accepted=np.array(r['tcp_target'])
 checked=k.teleop_step(s,s,accepted,g,.03,policy,v,q[:6],validated_goal=r)
-assert checked['joint_sdk']==r['joint_sdk'] and checked['ik']['fresh_path_rechecked']
+assert checked['joint_sdk']==r['joint_sdk'] and checked['ik']['fresh_target_rechecked']
 try:k.teleop_step(s,s,accepted,g,.03,policy,[0.]*6,q[:6],validated_goal=r)
 except ValueError as e:assert str(e)=='teleop joint acceleration exceeds bound', str(e)
 else:raise AssertionError('acceleration guard removed')
@@ -125,7 +125,7 @@ print('IPOPT used for 12 directions; vertical 10s, fixed TCP, bounds and no fall
     assert result.returncode==0,result.stdout+result.stderr
 
 
-def test_fresh_integer_recheck_keeps_endpoint_and_checks_path_without_resolving():
+def test_fresh_integer_recheck_keeps_endpoint_without_collision_or_resolving():
     cfg=settings()
     if not Path(cfg['robot_python']).exists():
         pytest.skip('configured offline IK environment unavailable')
@@ -152,17 +152,15 @@ fresh=copy.deepcopy(s);fresh['joints_rad']=(np.array(s['joints_rad'])+.5*(np.arr
 def forbidden(*args,**kwargs):raise AssertionError('IPOPT was called twice for one command')
 k.regularized_teleop_ik.solve=forbidden
 v=k.teleop_step(fresh,s,target,g,.031,asdict(p),[0.]*6,validated_goal=r)
-assert v['joint_sdk']==r['joint_sdk'] and v['ik']['fresh_path_rechecked']
+assert v['joint_sdk']==r['joint_sdk'] and v['ik']['fresh_target_rechecked']
 np.testing.assert_allclose(v['path_joints_rad'][0],fresh['joints_rad'],atol=1e-12)
-assert len(v['path_joints_rad'])>=11 and v['samples']>=55
-# Recheck still tests all intermediate finger strokes against genuine path.
-contacts=k.contacts
-def collision(q):return {(0,1)} if abs(q[6]*2-.0305)<1e-8 else contacts(q)
-k.contacts=collision
-try:k.teleop_step(fresh,s,target,g,.031,asdict(p),[0.]*6,validated_goal=r)
-except ValueError as e:assert 'self collision' in str(e)
-else:raise AssertionError('fresh recheck skipped gripper envelope')
-k.contacts=contacts
+assert len(v['path_joints_rad'])>=11 and v['samples']>=11
+assert v['path_precheck']=='none' and not v['path_collision_check']
+# Neither ordinary calculation nor fresh recheck may query collision geometry.
+def collision(*a,**kw):raise AssertionError('path collision queried')
+k.contacts=k.bounded_gripper_contacts=collision
+again=k.teleop_step(fresh,s,target,g,.031,asdict(p),[0.]*6,validated_goal=r)
+assert again['joint_sdk']==r['joint_sdk']
 bad=copy.deepcopy(r);bad['joint_sdk'][0]+=100000
 try:k.teleop_step(fresh,s,target,g,.031,asdict(p),[0.]*6,validated_goal=bad)
 except ValueError:pass

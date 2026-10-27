@@ -64,14 +64,12 @@ folded=state([-.198,-2.235,-.640,-4.956,30.453,2.705])
 try:teleop.geometry_hold(folded,g)
 except ValueError as e:assert 'self collision' in str(e)
 else:raise AssertionError('colliding hold accepted')
-# The send-time recheck still rejects a colliding swept path outside angle bounds.
-contacts=k.bounded_gripper_contacts
-k.bounded_gripper_contacts=lambda *a,**kw:{(0,1):.001}
-try:k.teleop_step(s,s,np.array(r['tcp_target']),g,.03,asdict(policy),[0.]*6,validated_goal=r)
-except ValueError as e:assert 'self collision' in str(e)
-else:raise AssertionError('colliding rechecked path accepted')
-k.bounded_gripper_contacts=contacts
-print('absolute angle bounds/margins removed; finite feedback, acceleration and collision checks retained')
+# Send-time recheck retains endpoint/rate validation without collision queries.
+def forbidden(*a,**kw):raise AssertionError('send-time path collision queried')
+k.bounded_gripper_contacts=forbidden
+checked=k.teleop_step(s,s,np.array(r['tcp_target']),g,.03,asdict(policy),[0.]*6,validated_goal=r)
+assert checked['joint_sdk']==r['joint_sdk'] and not checked['path_collision_check']
+print('absolute angle bounds/margins removed; finite feedback, acceleration and entry hold checks retained')
 '''
     result = subprocess.run([cfg['robot_python'], '-c', script], cwd=ROOT,
                             capture_output=True, text=True, timeout=60)

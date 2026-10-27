@@ -31,7 +31,8 @@ class DetourControl:
                 'automatic': True,
                 'speed_percent': context.get('speed_percent', config.speed_percent) if context else config.speed_percent,
                 'joint_lead_deg': context.get('joint_lead_deg', config.joint_lead_deg) if context else config.joint_lead_deg,
-                'temporary_tcp_departure': 'unrestricted', 'collision_scope': 'robot_only'}
+                'temporary_tcp_departure': 'unrestricted', 'collision_scope': 'none',
+                'path_precheck': 'none', 'path_collision_check': False}
 
     def consider_detour(self, keys, generation, result):
         if keys & JOINT_KEYS:
@@ -283,4 +284,5 @@ class DetourControl:
                               joints_sdk=result['joint_sdk'], state=refreshed,
                               speed_percent=speed_percent,
                               joint_lead_deg=joint_lead_deg,
-                              target_tcp=plan.get('target_tcp'), geometry_samples=result['samples'], progress=progress)
+                              target_tcp=plan.get('target_tcp'), geometry_samples=result['samples'], progress=progress,
+                              path_precheck='none', path_collision_check=False)

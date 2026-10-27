@@ -355,7 +355,9 @@ s={'joints_rad':np.deg2rad([-35.179,45.298,-21.786,97.077,14.347,-108.083]).toli
 target=k.placement(k.configuration(s)).homogeneous.copy()
 target[:3,:3]=Rotation.from_rotvec(target[:3,0]*np.deg2rad(5)).as_matrix()@target[:3,:3]
 plan=plan_detour(k,s,target,{'tcp':np.eye(4).tolist()},asdict(DetourPolicy(search_seeds=5)))
-assert plan['samples']>1000
+assert plan['samples']==0 and plan['scope']=='none'
+def forbidden(*a,**kw):raise AssertionError('transition queried path collision')
+k.bounded_gripper_collision=forbidden
 goal=np.array(plan['goal_joints_rad'])
 assert np.all(goal>=k.model.lowerPositionLimit[:6]) and np.all(goal<=k.model.upperPositionLimit[:6])
 previous=np.array(s['joints_rad']);velocity=np.deg2rad([1,0,0,2,-1,-1])

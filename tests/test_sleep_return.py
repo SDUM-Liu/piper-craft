@@ -63,6 +63,10 @@ def test_request_pauses_selected_arm_and_waits_before_planning(sleep_controller,
     f = sleep_controller
     view = request(f, arm)
     assert view['sleep_return']['state'] == 'waiting'
+    assert view['path_precheck'] == 'none' and not view['path_collision_check']
+    assert view['collision_scope'] == 'entry_hold_only'
+    assert f.manager.trace.context['path_precheck'] == 'none'
+    assert f.manager.trace.context['collision_scope'] == 'entry_hold_only'
     assert f.commands == [(arm, 'MotionCtrl_1', (0, 1, 0))]
     tick(f, 3)
     assert f.manager.detour_context['state'] == 'starting'
@@ -196,16 +200,19 @@ def test_legacy_sleep_pose_and_exact_sdk_units(sleep_controller):
     np.testing.assert_allclose(np.rad2deg(target['goal_joints_rad']), [.778, 0, -2.430, -3.757, 25.811, 1.498])
 
 
-def test_full_sleep_route_checks_interior_not_only_endpoints():
-    calls = []
-    def collision(q, width):
-        calls.append(q)
-        return .4 < q[0] < .6
-    model = SimpleNamespace(configuration=lambda state: state['joints_rad'], bounded_gripper_collision=collision)
+def test_sleep_does_not_query_path_or_finger_collision():
+    def forbidden(*a, **kw):
+        raise AssertionError('sleep queried local collision geometry')
+    model = SimpleNamespace(configuration=forbidden, bounded_gripper_collision=forbidden)
     state = {'joints_rad': [0.] * 6, 'gripper': {'width_m': .03}}
-    with pytest.raises(ValueError, match='self collision'):
-        plan_sleep_return(model, state, {'goal_joints_rad': [1., 0, 0, 0, 0, 0]}, {}, {'planning_timeout_s': 2})
-    assert len(calls) > 200
+    plan = plan_sleep_return(model, state, {'goal_joints_rad': [1., 0, 0, 0, 0, 0]}, {},
+                             {'planning_timeout_s': 2})
+    assert plan['samples'] == 0 and plan['scope'] == plan['path_precheck'] == 'none'
+    assert not plan['path_collision_check']
+    for bad in ([float('nan')] * 6, [0.] * 5):
+        with pytest.raises(ValueError, match='invalid sleep joint plan'):
+            plan_sleep_return(model, dict(state, joints_rad=bad), {'goal_joints_rad': [0.] * 6}, {},
+                              {'planning_timeout_s': 2})
 
 
 def test_desktop_sleep_requires_active_focused_local_session():
@@ -225,7 +232,7 @@ def test_desktop_sleep_requires_active_focused_local_session():
     assert len(calls) == 1
 
 
-def test_real_model_sleep_route_and_collision_rejection():
+def test_real_model_sleep_route_without_path_collision_check():
     cfg = settings()
     if not Path(cfg['robot_python']).exists():
         pytest.skip('offline model environment unavailable')
@@ -239,16 +246,17 @@ s={'joints_rad':np.deg2rad([-35.179,45.298,-21.786,97.077,14.347,-108.083]).toli
    'gripper':{'width_m':.03}}
 goal=np.array(s['joints_rad']);goal[0]+=np.deg2rad(1)
 p=plan_sleep_return(k,s,{'goal_joints_rad':goal.tolist()},{},{'planning_timeout_s':8})
-assert p['samples']>10 and 'target_tcp' not in p
+assert p['samples']==0 and p['scope']=='none' and 'target_tcp' not in p
 rng=np.random.default_rng(1234)
 for _ in range(200):
  q=rng.uniform(k.model.lowerPositionLimit[:6],k.model.upperPositionLimit[:6])
  bad=dict(s,joints_rad=q.tolist())
  if k.bounded_gripper_collision(k.configuration(bad),.03):break
 else:raise AssertionError('no collision fixture found')
-try:plan_sleep_return(k,bad,{'goal_joints_rad':q.tolist()},{},{'planning_timeout_s':8})
-except ValueError:pass
-else:raise AssertionError('self collision was accepted')
+def forbidden(*a,**kw):raise AssertionError('sleep queried path collision')
+k.bounded_gripper_collision=forbidden
+p=plan_sleep_return(k,bad,{'goal_joints_rad':q.tolist()},{},{'planning_timeout_s':8})
+assert not p['path_collision_check']
 print('offline real-model sleep checks passed',p['samples'])
 """
     result = subprocess.run([cfg['robot_python'], '-c', script], cwd=ROOT,
