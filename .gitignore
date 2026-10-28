@@ -26,6 +26,7 @@ docs/memory/state.json
 docs/memory/current.md
 docs/memory/problems.md
 docs/memory/.lock
+docs/memory/retention.json
 
 # Local success graphs and automatic demonstration index
 docs/memory/task_maps.json

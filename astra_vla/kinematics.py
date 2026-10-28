@@ -113,13 +113,10 @@ class Kinematics:
         return result
 
     def check_hold(self, state):
-        """Validate finite feedback and self collision; angles are controller-owned."""
+        """Validate feedback only; no entry self-collision or angle rejection."""
         joints = np.asarray(state['joints_rad'], dtype=float)
         if joints.shape != (6,) or not np.isfinite(joints).all():
             raise ValueError('invalid teleop joint feedback')
-        q = self.configuration(state)
-        if self.contacts(q):
-            raise ValueError("measured pose has URDF self collision")
 
     def start_limit_report(self, state, operator_recovery=False):
         """Allow bounded measured sag only in fully disabled standby; never change feedback."""

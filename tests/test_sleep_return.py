@@ -64,9 +64,9 @@ def test_request_pauses_selected_arm_and_waits_before_planning(sleep_controller,
     view = request(f, arm)
     assert view['sleep_return']['state'] == 'waiting'
     assert view['path_precheck'] == 'none' and not view['path_collision_check']
-    assert view['collision_scope'] == 'entry_hold_only'
+    assert view['collision_scope'] == 'none'
     assert f.manager.trace.context['path_precheck'] == 'none'
-    assert f.manager.trace.context['collision_scope'] == 'entry_hold_only'
+    assert f.manager.trace.context['collision_scope'] == 'none'
     assert f.commands == [(arm, 'MotionCtrl_1', (0, 1, 0))]
     tick(f, 3)
     assert f.manager.detour_context['state'] == 'starting'

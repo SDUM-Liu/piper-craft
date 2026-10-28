@@ -235,3 +235,34 @@ def test_native_session_rejects_direct_joint_input_without_mode_switch(controlle
     with pytest.raises(ValueError, match='关节点动请先切换到本地方案'):
         f.manager.input({'session':session, 'sequence':1, 'keys':['joint_1_plus']})
     assert not f.commands and not f.manager.keys
+
+
+@pytest.mark.parametrize('size', [(1100,700), (1280,800), (1920,1080)])
+@pytest.mark.parametrize('mode', ['base','motion'])
+@pytest.mark.parametrize('pending', [False,True])
+@pytest.mark.parametrize('minimap', [False,True])
+def test_entire_panels_and_key_captions_do_not_occlude_controls(window, size, mode, pending, minimap):
+    from dataclasses import replace
+    window.screen = pg.display.set_mode(size)
+    window.menu_open = False
+    window.client.coordinate_mode = mode
+    window.preferences = replace(window.preferences, show_minimap=minimap)
+    window.client.robot['teleop']['speed_profile_pending'] = 'fast' if pending else None
+    window.draw()
+    bounds = window.screen.get_rect()
+    panels = [window.toolbar_rect, window.key_panel_rect, window.joint_panel_rect]
+    if minimap:
+        panels.insert(0, window.minimap_rect)
+    assert all(bounds.contains(rect) for rect in panels)
+    assert all(not a.colliderect(b) for i,a in enumerate(panels) for b in panels[i+1:])
+    assert window.key_panel_rect.bottom+8 <= window.joint_panel_rect.top
+    for rect in [*window.key_rects.values(),*window.key_text_rects]:
+        assert window.key_panel_rect.contains(rect)
+        assert not rect.colliderect(window.joint_panel_rect)
+    for text in window.key_text_rects:
+        assert all(not text.colliderect(rect) for rect in window.key_rects.values())
+    for key,rect in window.joint_rects.items():
+        assert window.joint_panel_rect.contains(rect)
+        # The visible joint button must still own its actual click target.
+        target = next(name for name,box in reversed(window.hitboxes) if box.collidepoint(rect.center))
+        assert target == key

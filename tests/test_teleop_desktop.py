@@ -36,10 +36,33 @@ def test_f5_never_changes_selected_arm_or_motion():
     assert controls.camera == 'left_wrist'
 
 
+def test_task_actions_are_metadata_only_and_require_closed_control(window, tmp_path):
+    from astra_vla.task_archive import TaskArchive
+    window.task_archive = TaskArchive(tmp_path)
+    window.activate('task_begin')
+    assert window.task_archive.status() is None and '离线演示' in window.task_notice
+    window.demo = False
+    window.client.stop_pending = False
+    window.client.session = 'active'
+    window.activate('task_begin')
+    assert window.task_archive.status() is None and '退出控制' in window.task_notice
+    window.client.session = None
+    requests = []
+    window.client.request = lambda *args: requests.append(args)
+    window.activate('task_begin')
+    task = window.task_archive.status()
+    assert task and not requests
+    window.draw()
+    assert 'task_finish' in window.buttons
+    window.activate('task_finish')
+    assert window.task_archive.status() is None and '结果未知' in window.task_notice
+    assert not requests
+
+
 def test_entry_error_keeps_measured_cause_readable_in_hud(window):
     original = 'teleop hold requires joints inside hard limits; use explicit recovery: J2=-2.505° [0.000,180.000]°'
     message = control_message(original)
-    assert '起姿超限' in message and 'J2=-2.505°' in message
+    assert '起姿超限' in message and '已取消' in message and 'J2=-2.505°' in message
     lines = wrap_text(message, window.small, 300)
     assert ''.join(lines) == message
     assert all(window.small.size(line)[0] <= 300 for line in lines)
@@ -427,7 +450,7 @@ def test_controls_are_below_minimap_and_menu_actions_stay_in_menu(window, size):
     window.menu_open = False
     window.draw()
     from astra_vla.teleop import JOINT_KEYS
-    assert set(window.buttons) == {'left', 'right', 'open', 'acknowledge', 'backend', 'speed', 'record_window',
+    assert set(window.buttons) == {'left', 'right', 'open', 'acknowledge', 'coordinates', 'speed', 'record_window',
                                    'demonstrations', 'retry_cameras', 'menu', 'sleep'} | JOINT_KEYS
     assert all(window.sidebar_rect.contains(rect) and rect.top > window.minimap_rect.bottom
                for rect in [*window.buttons.values(), *window.key_rects.values()])
@@ -896,39 +919,29 @@ def test_held_step_readback_appears_in_command_chat_and_updates_once(window):
 
 
 @pytest.mark.parametrize('size', [(1280, 800), (1100, 700)])
-def test_backend_button_clears_keys_exits_control_and_selects_without_auto_open(window, size):
+def test_coordinate_button_stops_clears_keys_and_does_not_auto_enter(window, size):
     window.screen = pg.display.set_mode(size)
     window.menu_open = False
     window.client.request('open', 'left')
     window.controls.keys.add('w')
     window.draw()
-    window.handle(pg.event.Event(pg.MOUSEBUTTONDOWN, button=1, pos=window.buttons['backend'].center))
+    assert 'backend' not in window.buttons
+    window.handle(pg.event.Event(pg.MOUSEBUTTONDOWN, button=1, pos=window.buttons['coordinates'].center))
     assert not window.controls.keys and not window.client.session
-    assert window.client.execution_backend == 'controller_move_p'
+    assert window.client.coordinate_mode == 'motion'
+    assert window.client.execution_backend == 'regularized_move_j'
     window.draw()
-    texts = []
-    draw_text = window.text
-    window.text = lambda text, *a, **kw: (texts.append(str(text)), draw_text(text, *a, **kw))[1]
-    window.show_debug = True
-    window.draw()
-    assert any('控制器原生' in text for text in texts)
-    assert any('IK: controller' in text for text in texts)
-    assert any('无本地自碰撞检查' in text for text in texts)
-    for name, rect in window.hitboxes:
-        if name == 'backend':
-            assert window.screen.get_rect().contains(rect)
-    window.activate('backend')
-    assert window.client.execution_backend == 'regularized_move_j' and not window.client.session
+    window.activate('coordinates')
+    assert window.client.coordinate_mode == 'base' and not window.client.session
 
 
-def test_backend_button_is_available_in_menu_when_hud_is_hidden(window):
+def test_coordinate_switch_in_menu_and_f6_clear_input_without_auto_enter(window):
     window.show_hud = False
     window.menu_open = True
     window.draw()
-    assert 'backend' in window.buttons
-    window.handle(pg.event.Event(pg.MOUSEBUTTONDOWN, button=1, pos=window.buttons['backend'].center))
-    assert window.client.execution_backend == 'controller_move_p'
-    assert not window.client.session
+    assert 'coordinates' in window.buttons and 'backend' not in window.buttons
+    window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_F6, repeat=False))
+    assert window.client.coordinate_mode == 'motion' and not window.client.session
 
 
 def test_sleep_button_clears_keys_and_requests_selected_arm_without_opening(window):

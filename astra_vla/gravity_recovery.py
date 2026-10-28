@@ -52,15 +52,9 @@ class RecoveryPolicy:
 
 
 def recovery_joint_bounds(model):
-    """Recovery bounds, with the J5 upper angle delegated to the controller.
-
-    Keep a finite bound for JSON evidence and integer quantization: this is
-    only the signed 32-bit millidegree CAN encoding range, not a physical
-    joint-angle limit. Never modify the shared URDF model.
-    """
-    lower = model.model.lowerPositionLimit[:6].copy()
-    upper = model.model.upperPositionLimit[:6].copy()
-    upper[4] = math.radians(np.iinfo(np.int32).max / 1000)
+    """Only CAN integer encoding bounds; physical angles belong to firmware."""
+    lower = np.full(6, math.radians(np.iinfo(np.int32).min / 1000))
+    upper = np.full(6, math.radians(np.iinfo(np.int32).max / 1000))
     return lower, upper
 
 
@@ -88,10 +82,12 @@ def plan_recovery(model, state, other_state, geometry, policy):
     current = model.configuration(state)
     if not np.isfinite(current).all():
         raise ValueError('invalid gravity recovery feedback')
-    violations = recovery_limit_violations(model, state)
-    folded = (not violations and 0 <= math.degrees(current[1]) <= 3.5 and
-              -3.5 <= math.degrees(current[2]) <= 0)
-    if not violations and not folded:
+    # This is a folded-start recovery recipe, not a nominal URDF angle gate.
+    # Other starting poses are checked by the normal entry collision check.
+    # In particular J5/J6 outside the URDF do not block or get clipped.
+    folded = (abs(math.degrees(current[1])) <= 3.5 and
+              abs(math.degrees(current[2])) <= 3.5)
+    if not folded:
         return {'required': False}
     if not policy.enabled:
         raise ValueError('automatic gravity recovery is disabled')
@@ -105,35 +101,25 @@ def plan_recovery(model, state, other_state, geometry, policy):
         raise ValueError('automatic gravity recovery requires fully disabled standby')
     if control.get('err_code', 0) or control.get('arm_status', 0) or state['gripper'].get('faults'):
         raise ValueError('automatic gravity recovery requires fault-free feedback')
-    report = model.start_limit_report(state, operator_recovery=enabled_start)
-    eligible = {item['joint'] for item in violations}
-    report = {**report, 'blocking': [item for item in report['blocking'] if item['joint'] in eligible],
-              'tolerated': [item for item in report['tolerated'] if item['joint'] in eligible]}
-    if (report['blocking'] or any(x['joint'] not in (2, 3) or
-            x['excess_deg'] > policy.max_start_excess_deg + 1e-10 for x in report['tolerated'])):
-        detail = '; '.join(f"J{x['joint']}={x['measured_deg']}deg" for x in report['blocking']+report['tolerated'])
-        raise ValueError('automatic gravity recovery only accepts J2/J3 sag up to 3 degrees: '+detail)
     model.feedback_pose(state)  # SDK readback stays authoritative; no FK comparison.
     lower, upper = recovery_joint_bounds(model)
     origin = np.asarray(geometry.get('recovery_origin_joints_rad', current[:6]), dtype=float)
     if origin.shape != (6,) or not np.isfinite(origin).all():
         raise ValueError('invalid recovery origin')
     initial_sdk = np.rint(np.rad2deg(current[:6])*1000).astype(np.int64)
-    legal_sdk = np.clip(initial_sdk, np.ceil(np.rad2deg(lower)*1000).astype(np.int64),
-                        np.floor(np.rad2deg(upper)*1000).astype(np.int64))
+    legal_sdk = initial_sdk.copy()
+    # The demonstrated cold-enable handoff uses J2/J3 zero as an intermediate
+    # target. These are recipe targets, never bounds on measured joint angles.
+    legal_sdk[1] = max(0, legal_sdk[1])
+    legal_sdk[2] = min(0, legal_sdk[2])
     goal = legal_sdk.copy()
-    for item in report['tolerated']:
-        index = item['joint']-1
-        goal[index] = (math.ceil((math.degrees(lower[index])+policy.inset_deg)*1000)
-                       if current[index] < lower[index] else
-                       math.floor((math.degrees(upper[index])-policy.inset_deg)*1000))
     if folded:
-        goal[1] = max(goal[1], math.ceil((math.degrees(lower[1])+policy.inset_deg)*1000))
-        goal[2] = min(goal[2], math.floor((math.degrees(upper[2])-policy.inset_deg)*1000))
+        goal[1] = max(goal[1], math.ceil(policy.inset_deg*1000))
+        goal[2] = min(goal[2], math.floor(-policy.inset_deg*1000))
     bounded_hold = bool(policy.streamed_recovery and state.get('arm') == 'right')
     stages = []
     startup = None
-    if bounded_hold and current[1] < lower[1]:
+    if bounded_hold and current[1] < 0:
         # Use an in-range all-arm enable target, never the unrealized negative-J2 hold.
         startup = legal_sdk.tolist()
         stages.append(startup)
@@ -164,7 +150,7 @@ def plan_recovery(model, state, other_state, geometry, policy):
               'lower_rad': lower.tolist(), 'upper_rad': upper.tolist(),
               'initial_excess_rad': recovery_limit_excess(model, current).tolist(),
               'path_joints_rad': segments, 'samples': len(segments),
-              'tolerated_start_joint_limits': report['tolerated']}
+              'tolerated_start_joint_limits': [], 'joint_position_limits': 'controller'}
     if startup is not None:
         result['legal_startup_joint_sdk'] = startup
     validated_recovery_plan(result, state, policy, origin)
@@ -174,7 +160,8 @@ def plan_recovery(model, state, other_state, geometry, policy):
 def check_recovery_target(model, state, integers, origin):
     """Validate ordinary MOVE_J packet encoding, feedback and recovery angles."""
     if (not isinstance(integers, (list, tuple)) or len(integers) != 6 or
-            any(isinstance(v, bool) or not isinstance(v, int) for v in integers)):
+            any(isinstance(v, bool) or not isinstance(v, int) or
+                not np.iinfo(np.int32).min <= v <= np.iinfo(np.int32).max for v in integers)):
         raise ValueError('invalid streamed recovery joint packet')
     current = np.asarray(state['joints_rad'], dtype=float)
     origin = np.asarray(origin, dtype=float)

@@ -13,6 +13,7 @@ import av
 from astra_vla.clock_mapping import CameraClock
 from astra_vla.config import RUNTIME, settings
 from astra_vla.rpc import serve
+from astra_vla.rgb_frame import snapshot_frames
 
 
 def usb_identity(port):
@@ -66,6 +67,7 @@ class RGB:
         self.lock = threading.Lock()
         self.ownership = threading.Lock()
         self.frames, self.errors, self.threads, self.stops = {}, {}, {}, {}
+        self.raw_frames = {}
         for role in ('left_wrist', 'right_wrist'):
             self.retry(role)
 
@@ -117,7 +119,8 @@ class RGB:
                     if previous is not None and stamp <= previous:
                         raise ValueError('RGB kernel source time did not advance')
                     previous, sequence, last_good = stamp, sequence+1, mono
-                    ok, jpeg = cv2.imencode('.jpg', frame.to_ndarray(format='bgr24'),
+                    pixels = frame.to_ndarray(format='bgr24')
+                    ok, jpeg = cv2.imencode('.jpg', pixels,
                                             [cv2.IMWRITE_JPEG_QUALITY, 90])
                     if not ok:
                         raise RuntimeError('RGB JPEG encoding failed')
@@ -126,6 +129,7 @@ class RGB:
                             'serial': self.config['cameras'][role]['serial'], 'width': 640, 'height': 480,
                             'jpeg': base64.b64encode(jpeg).decode(), 'source': 'native_rgb',
                             'backend': 'v4l2_color', 'timestamp_source': 'kernel_monotonic'}
+                        self.raw_frames[role] = (stamp, pixels)
                         self.errors.pop(role, None)
             if not stop.is_set():
                 raise RuntimeError('RGB color stream ended')
@@ -136,17 +140,20 @@ class RGB:
             if container is not None:
                 container.close()
 
-    def snapshot(self):
+    def snapshot(self, image_format='jpeg'):
         with self.lock:
             now = time.time()
-            return {'cameras': {role: dict(self.frames.get(role, {'available': False,
+            result = {'cameras': {role: dict(self.frames.get(role, {'available': False,
                         'serial': self.config['cameras'][role]['serial']}),
                         age_s=now-self.frames[role]['stamp'] if role in self.frames else None)
                     for role in ('left_wrist', 'right_wrist')}, 'errors': dict(self.errors)}
+            raw = dict(self.raw_frames)
+        result['cameras'] = snapshot_frames(result['cameras'], raw, image_format)
+        return result
 
     def dispatch(self, method, args):
         if method == 'snapshot':
-            return self.snapshot()
+            return self.snapshot(args.get('format', 'jpeg'))
         if method == 'retry':
             return self.retry(args['camera'])
         raise ValueError('unknown RGB method')

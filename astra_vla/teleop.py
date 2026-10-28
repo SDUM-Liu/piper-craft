@@ -16,8 +16,23 @@ KEYS = frozenset(('w', 's', 'a', 'd', 'space', 'lshift', 'i', 'k', 'j', 'l', 'o'
 TRANSLATION_KEYS = frozenset(('w', 's', 'a', 'd', 'space', 'lshift'))
 GRIPPER_KEYS = frozenset(('q', 'e'))
 SPEED_PROFILES = ('slow', 'normal', 'fast')
-EXECUTION_BACKENDS = ('regularized_move_j', 'controller_move_p')
+EXECUTION_BACKENDS = ('regularized_move_j',)
 BACKEND_LABELS = {'regularized_move_j': '本地 IK', 'controller_move_p': '控制器原生'}
+COORDINATE_MODES = ('base', 'motion')
+COORDINATE_LABELS = {'base': '基坐标', 'motion': '运动坐标'}
+
+
+def control_axes(actual, policy):
+    """Forward/right/up in the selected arm's base, independent of camera view.
+
+    Base: +X/-Y/+Z. Motion: the measured tool triad, including its vertical
+    direction. Rotation uses these same axes; there is no hybrid base lift.
+    """
+    if policy.coordinate_mode == 'base':
+        return np.array([1., 0., 0.]), np.array([0., -1., 0.]), np.array([0., 0., 1.])
+    if policy.axis_convention == 'piper_tool':
+        return actual[:3, 2], -actual[:3, 1], -actual[:3, 0]
+    return actual[:3, 0], -actual[:3, 1], actual[:3, 2]
 
 
 class RateLimitError(ValueError):
@@ -67,6 +82,7 @@ class Policy:
     follow_mode: str = 'position_velocity'
     axis_convention: str = 'xyz'
     vertical_frame: str = 'tcp'
+    coordinate_mode: str = 'base'
     ik_solver: str = 'casadi_ipopt'
 
     def __post_init__(self):
@@ -79,6 +95,8 @@ class Policy:
             raise ValueError('unknown teleop follow mode')
         if self.axis_convention not in ('xyz', 'piper_tool'):
             raise ValueError('unknown teleop axis convention')
+        if self.coordinate_mode not in COORDINATE_MODES:
+            raise ValueError('unknown teleop coordinate mode')
         if self.vertical_frame not in ('tcp', 'base') or self.ik_solver not in ('casadi_ipopt', 'controller'):
             raise ValueError('unknown teleop vertical frame/IK solver')
         maxima = dict(control_hz=50 if fast else 20,
@@ -87,7 +105,7 @@ class Policy:
                       rotation_lead_deg=.5, gripper_opening_lead_m=.003,
                       joint_acceleration_deg_s2=120, joint_lead_deg=6 if fast else 2, tcp_drift_m=.002)
         for field in fields(self):
-            if field.name in ('follow_mode', 'axis_convention', 'vertical_frame', 'ik_solver', 'speed_profile'):
+            if field.name in ('follow_mode', 'axis_convention', 'vertical_frame', 'coordinate_mode', 'ik_solver', 'speed_profile'):
                 continue
             value = getattr(self, field.name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -182,15 +200,11 @@ class Integrator:
                     'ee_target': pose(state), 'width_m': max(0., float(state['gripper']['width_m'])),
                     'heading': self.heading.copy(), 'rotating': False, 'speed_fraction': motion_gain,
                     'arm_motion': True, 'gripper_motion': False, 'joint_jog': next(iter(joint))}
-        if self.policy.axis_convention == 'piper_tool':
-            forward, right, up = actual[:3, 2], -actual[:3, 1], -actual[:3, 0]
-        else:
-            forward, right, up = actual[:3, 0], -actual[:3, 1], actual[:3, 2]
+        forward, right, up = control_axes(actual, self.policy)
         roll = -forward
-        vertical = np.array([0., 0., 1.]) if self.policy.vertical_frame == 'base' else up
         velocity = (forward * (('w' in keys) - ('s' in keys)) +
                     right * (('d' in keys) - ('a' in keys)) +
-                    vertical * (('space' in keys) - ('lshift' in keys)))
+                    up * (('space' in keys) - ('lshift' in keys)))
         velocity /= max(1., np.linalg.norm(velocity))
         angular = (right * (('i' in keys) - ('k' in keys)) +
                    up * (('j' in keys) - ('l' in keys)) +

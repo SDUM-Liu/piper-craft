@@ -121,7 +121,7 @@ def test_tcp_local_ten_second_hold_needs_only_feedback_and_tool_offset(key, loca
     tcp = np.eye(4)
     tcp[:3, :3] = Rotation.from_euler('xyz', [12, 28, -15], degrees=True).as_matrix()
     tcp[:3, 3] = [.02, -.03, .145]
-    integrator = Integrator(measured, tcp)
+    integrator = Integrator(measured, tcp, policy=Policy(coordinate_mode='motion'))
     initial = integrator.target.copy()
     for _ in range(200):
         proposal = integrator.propose(measured, frozenset((key,)), .05, .065)
@@ -140,7 +140,7 @@ def test_tcp_local_rotation_axes_pin_offset_tool_position(key, rotation_axis):
     measured['ee_pose']['rpy_deg'] = [25, 30, -17]
     tcp = np.eye(4)
     tcp[:3, 3] = [.02, -.03, .145]
-    integrator = Integrator(measured, tcp)
+    integrator = Integrator(measured, tcp, policy=Policy(coordinate_mode='motion'))
     initial = integrator.target.copy()
     for _ in range(200):
         proposal = integrator.propose(measured, frozenset((key,)), .05, .065)
@@ -883,7 +883,7 @@ def test_piper_input_axes_follow_tool_extension_not_generic_x(key,direction):
     tcp=np.eye(4)
     tcp[:3,3]=[.023,-.017,.145]
     tcp[:3,:3]=Rotation.from_euler('xyz',[17,23,-11],degrees=True).as_matrix()
-    policy=Policy(axis_convention='piper_tool')
+    policy=Policy(axis_convention='piper_tool',coordinate_mode='motion')
     integrator=Integrator(measured,tcp,policy=policy)
     initial=integrator.target.copy()
     for _ in range(200):
@@ -903,7 +903,7 @@ def test_piper_rotation_axes_pin_nonzero_offset_tcp(key,axis):
     measured['ee_pose']['rpy_deg']=[-19.,47.,12.]
     tcp=np.eye(4)
     tcp[:3,3]=[.025,-.015,.145]
-    integrator=Integrator(measured,tcp,policy=Policy(axis_convention='piper_tool'))
+    integrator=Integrator(measured,tcp,policy=Policy(axis_convention='piper_tool',coordinate_mode='motion'))
     initial=integrator.target.copy()
     proposal=integrator.propose(measured,keyset([key]),.05,.065)
     np.testing.assert_allclose(proposal['tcp_target'][:3,3],initial[:3,3],atol=1e-12)

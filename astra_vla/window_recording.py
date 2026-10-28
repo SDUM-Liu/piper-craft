@@ -18,6 +18,10 @@ class WindowRecording:
 
     def __init__(self, destination=None, clock=time.monotonic):
         self.destination = Path(destination) if destination else ROOT/'runs'
+        self.task_archive = None
+        if destination is None:
+            from astra_vla.task_archive import TaskArchive
+            self.task_archive = TaskArchive(ROOT)
         self.clock = clock
         self.lock = threading.Lock()
         self.thread = None
@@ -36,8 +40,14 @@ class WindowRecording:
             if self.thread and self.thread.is_alive():
                 return
             self.size = tuple(max(2, int(v)//2*2) for v in size)
-            directory = self.destination/('window_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8])
-            directory.mkdir(parents=True)
+            name = 'window_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]
+            directory = (self.task_archive.reserve(name, 'window') if self.task_archive else self.destination/name)
+            try:
+                directory.mkdir(parents=True)
+            except OSError:
+                if self.task_archive:
+                    self.task_archive.update(directory, discard=True)
+                raise
             self.path = directory/'window.mp4'
             self.started, self.wall_started = self.clock(), time.time()
             self.next_frame, self.frames, self.dropped = self.started, 0, 0
@@ -136,6 +146,9 @@ class WindowRecording:
                             'robot_motion_verified': False}
                 try:
                     atomic_json(self.path.with_suffix('.json'), metadata)
+                    if self.task_archive:
+                        self.task_archive.update(self.path.parent, state='closed', result=metadata,
+                                                 finished_at=time.time())
                 except Exception as exc:
                     failure = failure or str(exc)
                 self.error, self.state = failure, 'error' if failure else 'saved'

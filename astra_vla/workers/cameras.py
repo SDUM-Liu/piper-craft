@@ -12,6 +12,7 @@ from sensor_msgs.msg import Image
 
 from astra_vla.config import RUNTIME, settings
 from astra_vla.rpc import call, serve
+from astra_vla.rgb_frame import snapshot_frames
 
 
 class Cameras:
@@ -20,6 +21,7 @@ class Cameras:
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         self.frames, self.errors = {}, {}
+        self.raw_frames = {}
         self.subscribers = [rospy.Subscriber(cfg['color'], Image, self.color,
             callback_args=name, queue_size=1) for name, cfg in self.config['cameras'].items()]
 
@@ -37,18 +39,21 @@ class Cameras:
                     'sequence': message.header.seq, 'serial': self.config['cameras'][name]['serial'],
                     'width': message.width, 'height': message.height,
                     'jpeg': base64.b64encode(jpeg).decode(), 'source': 'ros_rgb'}
+                self.raw_frames[name] = (stamp, image.copy())
                 self.errors.pop(name, None)
         except Exception as exc:
             with self.lock:
                 self.errors[name] = str(exc)
 
-    def snapshot(self):
+    def snapshot(self, image_format='jpeg'):
         with self.lock:
             result = {name: dict(self.frames.get(name, {'available': False, 'serial': cfg['serial']}))
                       for name, cfg in self.config['cameras'].items()}
             errors = dict(self.errors)
+            raw = dict(getattr(self, 'raw_frames', {}))
+        result = snapshot_frames(result, raw, image_format)
         try:
-            native = call(RUNTIME/'rgb.sock', 'snapshot', timeout=.4)
+            native = call(RUNTIME/'rgb.sock', 'snapshot', {'format': image_format}, timeout=.4)
             for name, frame in native['cameras'].items():
                 if (name in result and frame.get('serial') == self.config['cameras'][name]['serial'] and
                         frame.get('available') and frame.get('stamp', 0) > result[name].get('stamp', 0)):
@@ -63,7 +68,7 @@ class Cameras:
 
     def dispatch(self, method, args):
         if method == 'snapshot':
-            return self.snapshot()
+            return self.snapshot(args.get('format', 'jpeg'))
         if method == 'retry':
             return call(RUNTIME/'rgb.sock', 'retry', {'camera': args['camera']}, timeout=5)
         raise ValueError('unknown RGB camera method')

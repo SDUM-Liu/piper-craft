@@ -108,8 +108,13 @@ def record_session(path, result, *, directory=DIRECTORY):
     item = {'session': path.name, 'stamp': stamp, 'summary': short(summary),
             'evidence': evidence, 'commands': dict(commands),
             'stop_confirmed': result.get('stop_confirmed') is True}
+    from astra_vla.task_archive import TaskArchive
+    archive = TaskArchive.for_artifact(path) if manifest.get('task_id') else None
+    if archive:
+        data = archive.update(path, commands=dict(commands), result=result)
+        item = task_item(archive, data)
     with edit(directory) as state:
-        state['sessions'] = [s for s in state['sessions'] if s['session'] != path.name] + [item]
+        state['sessions'] = [s for s in state['sessions'] if s['session'] != item['session']] + [item]
         reason = short(result.get('reason'))
         fault_words = ('camera','feedback','deadline','limit','collision','ik','fault','gravity','disagrees')
         if result.get('stop_confirmed') is False or any(word in reason.lower() for word in fault_words):
@@ -122,6 +127,35 @@ def record_session(path, result, *, directory=DIRECTORY):
                     'inference':'', 'change':'', 'validation':'自动收录，待分析；没有声明修复或实体任务成功。',
                     'evidence':evidence}
                 state['problems'] = [p for p in state['problems'] if p['topic'] != topic]+[problem]
+
+
+def task_item(archive, data):
+    result = archive.summary(data)
+    failed = data['outcome'] in ('failure', 'aborted')
+    summary = ('任务结果='+data['outcome']+'；'+data.get('summary', '') if failed else
+               '任务'+data['name']+'；控制分段'+str(result['segment_count'])+'；SDK写入尝试'+
+               str(sum(result['commands'].values()))+'次；最近静止确认='+str(result['last_stop_confirmed'])+
+               '；任务结果='+data['outcome']+'；'+(data.get('summary') or '实体任务成功未由控制记录证明'))
+    return {'session': data['task_id'], 'stamp': time.time(), 'summary': short(summary),
+            'evidence': '' if failed else str(archive.path(data['task_id']).relative_to(archive.root)),
+            'commands': {} if failed else result['commands'],
+            'stop_confirmed': result['last_stop_confirmed'] is True}
+
+
+def record_task(archive, data, *, directory=None):
+    directory = directory or archive.root/'docs/memory'
+    item = task_item(archive, data)
+    if not item['commands'] and data['outcome'] == 'unknown' and not data.get('summary'):
+        return  # An empty/observation-only task is not an operation experience.
+    prefix = str(archive.path(data['task_id']).relative_to(archive.root))
+    with edit(directory) as state:
+        state['sessions'] = [s for s in state['sessions'] if s['session'] != item['session']] + [item]
+        if data['outcome'] in ('failure', 'aborted'):
+            if prefix in state.get('context', {}).get('evidence', ''):
+                state['context']['evidence'] = ''
+            for problem in state['problems']:
+                if prefix in problem.get('evidence', ''):
+                    problem['evidence'] = ''
 
 
 def record_context(observed, evidence='', *, directory=DIRECTORY):

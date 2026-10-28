@@ -177,7 +177,9 @@ class Robot:
                                    "ik_solver": "controller" if native else "casadi_ipopt",
                                    "motion_mode": "MOVE_P" if native else "MOVE_J", "pose_source": "controller_sdk",
                                    "joint_position_limits": "controller",
-                                   "execution_backends": ["regularized_move_j", "controller_move_p"]},
+                                   "execution_backends": ["regularized_move_j"],
+                                   "native_control_enabled": False,
+                                   "coordinate_modes": ["base", "motion"]},
                 "teleop": teleop.view() if teleop else {"active": False}}
 
     def command(self, p, method, *args):

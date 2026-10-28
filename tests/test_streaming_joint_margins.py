@@ -55,15 +55,21 @@ for index,value in [(3,97.077),(3,100.01),(3,-100.01),(4,70.01),
 s=state([0,50,-40,99.98,20,0]);q=k.configuration(s);t=q.copy();t[3]+=math.radians(.03)
 r=k.teleop_step(s,s,k.placement(t).homogeneous.copy(),g,.03,asdict(policy),[0.]*6)
 assert r['goal_joints_rad'][3]>k.model.upperPositionLimit[3]
-# Nonfinite joints and actual self collision remain blockers at entry.
+# Invalid feedback still blocks; folded mesh overlap no longer gates entry.
 bad=copy.deepcopy(s);bad['joints_rad'][0]=float('nan')
 try:teleop.geometry_hold(bad,g)
 except ValueError as e:assert 'invalid teleop joint feedback' in str(e)
 else:raise AssertionError('nonfinite joints accepted')
 folded=state([-.198,-2.235,-.640,-4.956,30.453,2.705])
-try:teleop.geometry_hold(folded,g)
-except ValueError as e:assert 'self collision' in str(e)
-else:raise AssertionError('colliding hold accepted')
+def no_collision(*args,**kwargs):raise AssertionError('entry queried local self collision')
+k.contacts=k.bounded_gripper_contacts=no_collision
+for width in (.03,.065):
+ folded['gripper']['width_m']=width
+ assert teleop.geometry_hold(folded,dict(g,unverified_gripper_max_m=.0855)) is True
+assert teleop.geometry_hold(folded,None) is True
+try:teleop.geometry_hold(folded,{'scope':'wrong'})
+except ValueError:pass
+else:raise AssertionError('wrong geometry scope accepted')
 # Send-time recheck retains endpoint/rate validation without collision queries.
 def forbidden(*a,**kw):raise AssertionError('send-time path collision queried')
 k.bounded_gripper_contacts=forbidden

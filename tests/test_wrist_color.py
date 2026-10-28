@@ -56,7 +56,7 @@ def test_capture_discards_empty_startup_and_rejects_repeated_source(monkeypatch)
     monkeypatch.setattr(rgb.av, 'open', open_color)
     camera = rgb.RGB.__new__(rgb.RGB)
     camera.config = {'cameras': {'left_wrist': {'serial': 'wrist'}}}
-    camera.lock, camera.frames, camera.errors = threading.Lock(), {}, {}
+    camera.lock, camera.frames, camera.errors, camera.raw_frames = threading.Lock(), {}, {}, {}
     camera.discover = lambda role: '/fake/color'
     camera.capture('left_wrist', threading.Event())
     assert camera.frames['left_wrist']['sequence'] == 1

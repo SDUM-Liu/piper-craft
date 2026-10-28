@@ -26,9 +26,10 @@ from astra_vla.codex_messages import CodexMessageReader
 from astra_vla.public_session import PublicSessionFeed, bind_current_session
 from astra_vla.config import ROOT, RUNTIME, tcp_configuration
 from astra_vla.rpc import call
-from astra_vla.teleop import BACKEND_LABELS, EXECUTION_BACKENDS, JOINT_KEYS, KEYS, SPEED_PROFILES, Integrator, Policy, pose
+from astra_vla.teleop import COORDINATE_LABELS, COORDINATE_MODES, EXECUTION_BACKENDS, JOINT_KEYS, KEYS, SPEED_PROFILES, Integrator, Policy, pose
 from astra_vla.teleop_preferences import BINDING_HELP, DEFAULT_BINDINGS, DesktopPreferences
 from astra_vla.window_recording import WindowRecording
+from astra_vla.task_archive import TaskArchive
 from astra_vla.demonstrations import DemonstrationRecording, available, select_reference, demonstration_label
 from astra_vla.step_feedback import feedback_text
 
@@ -55,9 +56,9 @@ def control_message(message, telemetry=None):
         confirmed = '已确认静止' if telemetry.get('stop_confirmed') else '已请求停止，尚未确认静止'
         return f'历史停止原因：旧版松键位移阈值（现已取消）{detail}。{confirmed}。F3查看原始记录。'
     if message.startswith('teleop hold requires joints inside hard limits'):
-        return '起姿超限，需先普通模式恢复起姿：' + message.partition('recovery: ')[2]
+        return '历史起姿超限记录（本地角度拒绝现已取消）：' + message.partition('recovery: ')[2]
     if message == 'measured pose has URDF self collision':
-        return '起姿自碰撞检查未通过；需先建立无自碰撞起姿'
+        return '历史起姿自碰撞拒绝（本地入口检查现已取消）'
     if message == 'automatic gravity recovery requires fully disabled standby':
         return '自动下垂恢复只支持完全失能的待机起姿；当前模式不满足条件'
     if message.startswith('automatic gravity recovery only accepts J2/J3 sag up to 3 degrees'):
@@ -92,7 +93,7 @@ def control_message(message, telemetry=None):
     return message
 
 
-def debug_pose_lines(tcp, convention, forward_label='W'):
+def debug_pose_lines(tcp, convention, forward_label='W', coordinate_mode='motion'):
     """Describe measured TCP in its own arm base; F5 never changes this frame."""
     if tcp is None:
         return ['XYZ: 等待反馈（绝对坐标 / 本臂基座 / mm）', 'Facing: 等待反馈']
@@ -100,7 +101,8 @@ def debug_pose_lines(tcp, convention, forward_label='W'):
     if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
         return ['XYZ: 无效反馈（绝对坐标 / 本臂基座 / mm）', 'Facing: 无效反馈']
     rotation = matrix[:3, :3]
-    forward = rotation[:, 2] if convention == 'piper_tool' else rotation[:, 0]
+    forward = (np.array([1., 0., 0.]) if coordinate_mode == 'base' else
+               rotation[:, 2] if convention == 'piper_tool' else rotation[:, 0])
     dominant = int(np.argmax(np.abs(forward)))
     facing = ('+' if forward[dominant] >= 0 else '-') + 'XYZ'[dominant]
     horizontal = math.hypot(forward[0], forward[1])
@@ -185,6 +187,8 @@ class Client:
         self.speed_profile = 'normal'
         self.execution_backend = 'regularized_move_j'
         self.pending_backend = None
+        self.pending_coordinate_mode = None
+        self.coordinate_mode = self.policy.coordinate_mode
         self.requested_open_epoch = 0
         self.lock = threading.Lock()
         self.done = threading.Event()
@@ -215,7 +219,7 @@ class Client:
 
     def intent(self, controls, focused, *, cancel_detour=False):
         with self.lock:
-            keys = sorted(controls.keys) if focused and self.pending_backend is None else []
+            keys = sorted(controls.keys) if focused and self.pending_backend is None and self.pending_coordinate_mode is None else []
             changed = (keys != self.keys or focused != self.focused or
                        self.speed_profile != controls.speed_profile or self.cancel_detour != cancel_detour)
             self.cancel_detour = cancel_detour
@@ -236,7 +240,7 @@ class Client:
                 self.cancel_epoch += 1
                 self.control_active = False
             if action == 'open':
-                if self.session or self.opening or self.stop_pending or self.pending_backend is not None:
+                if self.session or self.opening or self.stop_pending or self.pending_backend is not None or self.pending_coordinate_mode is not None:
                     return
                 self.requested_open_epoch = self.cancel_epoch
                 self.opening = True
@@ -257,40 +261,44 @@ class Client:
 
     def request_backend(self, backend):
         if backend not in EXECUTION_BACKENDS:
-            raise ValueError('unknown execution backend')
+            raise ValueError('控制器原生 MOVE_P 已禁用')
+
+    def request_coordinate_mode(self, mode):
+        if mode not in COORDINATE_MODES:
+            raise ValueError('unknown teleop coordinate mode')
         with self.lock:
-            if self.stop_pending or self.pending_backend is not None or backend == self.execution_backend:
+            if self.stop_pending or self.pending_coordinate_mode is not None or mode == self.coordinate_mode:
                 return
             self.keys, self.control_active = [], False
             self.cancel_epoch += 1
             epoch = self.cancel_epoch
-            self.pending_backend, self.stop_pending = backend, True
+            self.pending_coordinate_mode, self.stop_pending = mode, True
             self.input_changed.set()
-            thread = threading.Thread(target=self.complete_backend_switch, args=(backend, epoch),
-                                      daemon=True, name='desktop-backend-switch')
+            thread = threading.Thread(target=self.complete_coordinate_switch, args=(mode, epoch),
+                                      daemon=True, name='desktop-coordinate-switch')
             thread.start()
             self.threads.append(thread)
 
-    def complete_backend_switch(self, backend, epoch):
+    def complete_coordinate_switch(self, mode, epoch):
         try:
             result = self.rpc(RUNTIME / 'robot.sock', 'stop',
-                              {'reason': 'desktop backend switch', 'manual_tcp': True}, timeout=5)
+                              {'reason': 'desktop coordinate switch', 'manual_tcp': True}, timeout=5)
             if result.get('stop_confirmed') is not True:
-                raise RuntimeError('切换未完成：尚未确认静止，请再次请求停止')
+                raise RuntimeError('尚未确认静止，坐标模式未切换')
             with self.lock:
                 if epoch != self.cancel_epoch or self.done.is_set():
                     return
-                self.execution_backend = backend
+                self.coordinate_mode = mode
                 self.session, self.keys, self.control_active = None, [], False
                 if 'arms' in result:
                     self.robot = result
                 self.error = ''
         except Exception as exc:
             with self.lock:
-                self.error = '方案切换：'+str(exc)
+                self.error = '坐标切换：'+str(exc)
         finally:
             with self.lock:
-                self.pending_backend, self.stop_pending = None, False
+                self.pending_coordinate_mode, self.stop_pending = None, False
 
     def priority_stop(self, reason):
         try:
@@ -449,13 +457,15 @@ class Client:
                     backend = self.execution_backend
                     if epoch != self.cancel_epoch or self.stop_pending:
                         return
+                if backend not in EXECUTION_BACKENDS:
+                    raise RuntimeError('控制器原生 MOVE_P 已禁用')
                 supported = self.robot.get('motion_control', {}).get('execution_backends', [])
                 if backend == 'controller_move_p' and backend not in supported:
                     raise RuntimeError('机器人服务尚未加载控制器原生方案，请重启匹配版本')
                 result = self.rpc(RUNTIME / 'robot.sock', 'teleop_open',
                                   {'arm': arm, 'preparation_cancel_supported': True,
                                    'speed_profile': self.speed_profile,
-                                   'execution_backend': backend}, timeout=75)
+                                   'execution_backend': backend, 'coordinate_mode': self.coordinate_mode}, timeout=75)
                 if (self.speed_profile != 'normal' and
                         result.get('speed_profile_active') != self.speed_profile):
                     self.rpc(RUNTIME / 'robot.sock', 'teleop_close',
@@ -469,6 +479,10 @@ class Client:
                     self.rpc(RUNTIME / 'robot.sock', 'teleop_close',
                              {'session': result['session'], 'reason': 'desktop preparation cancelled'}, timeout=5)
                     return
+                if result.get('coordinate_mode') != self.coordinate_mode:
+                    self.rpc(RUNTIME / 'robot.sock', 'teleop_close',
+                             {'session': result['session'], 'reason': 'worker coordinate mode mismatch'}, timeout=5)
+                    raise RuntimeError('机器人服务尚未加载所选坐标模式，请重启匹配版本')
                 with self.lock:
                     self.session, self.sequence = result['session'], 0
                     self.session_started = time.monotonic()
@@ -546,7 +560,7 @@ class Client:
                                  {'session': session, 'sequence': sequence, 'keys': keys,
                                   'focused': True, 'ui_age_s': ui_age, 'speed_profile': profile,
                                   'cancel_detour': cancel_detour,
-                                  'execution_backend': backend}, timeout=.2)
+                                  'execution_backend': backend, 'coordinate_mode': self.coordinate_mode}, timeout=.2)
             except Exception as exc:
                 # On input failure never keep replaying a stale intent. The worker
                 # watchdog independently pauses even if this close cannot get through.
@@ -576,6 +590,8 @@ class DemoClient:
         self.speed_profile = 'normal'
         self.execution_backend = 'regularized_move_j'
         self.pending_backend = None
+        self.pending_coordinate_mode = None
+        self.coordinate_mode = self.policy.coordinate_mode
         self.tcp = tcp_configuration()['arms']
         self.arm, self.integrator = 'left', None
         self.last_tick, self.last_keys = clock(), frozenset()
@@ -670,11 +686,16 @@ class DemoClient:
 
     def request_backend(self, backend):
         if backend not in EXECUTION_BACKENDS:
-            raise ValueError('unknown execution backend')
+            raise ValueError('控制器原生 MOVE_P 已禁用')
+
+    def request_coordinate_mode(self, mode):
+        if mode not in COORDINATE_MODES:
+            raise ValueError('unknown teleop coordinate mode')
         self.request('close')
-        self.execution_backend = backend
-        self.robot['teleop'].update(execution_backend=backend, ik_solver=(
-            'controller' if backend == 'controller_move_p' else 'casadi_ipopt'))
+        self.coordinate_mode = mode
+        self.base_policy = replace(self.base_policy, coordinate_mode=mode)
+        self.policy = self.base_policy.for_speed(self.speed_profile)
+        self.robot['teleop'].update(coordinate_mode=mode, policy=asdict(self.policy))
 
     def shutdown(self):
         self.request('close')
@@ -698,6 +719,10 @@ class Window:
         self.controls.speed_profile = self.preferences.startup_speed
         self.controls.third_person = self.preferences.startup_view == 'top'
         self.client.speed_profile = self.preferences.startup_speed
+        self.client.coordinate_mode = self.preferences.startup_coordinate_mode
+        if demo:
+            self.client.base_policy = replace(self.client.base_policy, coordinate_mode=self.client.coordinate_mode)
+            self.client.policy = self.client.base_policy.for_speed(self.client.speed_profile)
         self.screen = pygame.display.set_mode(size, pygame.RESIZABLE)
         pygame.display.set_caption('PIPER CRAFT · 真实机械臂遥操作')
         pygame.key.set_repeat()
@@ -732,7 +757,9 @@ class Window:
         self.codex_session = None if demo else PublicSessionFeed()
         self.codex_messages = (CodexMessageReader(codex_messages_path, max_age_s=20.)
                                if not demo or codex_messages_path is not None else None)
-        self.recording = WindowRecording()
+        self.recording = WindowRecording(ROOT/'runs/offline_windows' if demo else None)
+        self.task_archive = TaskArchive(ROOT)
+        self.task_notice = ''
         self.recording_seen = 'idle'
         self.recording_notice = ''
         self.demonstration = DemonstrationRecording(ROOT/'runs/offline_demonstrations' if demo else None)
@@ -950,12 +977,12 @@ class Window:
             action = self.controls.press('1' if name == 'left' else '2')
             if action:
                 self.client.request(action, self.controls.arm)
-        elif name == 'backend':
+        elif name == 'coordinates':
             self.controls.blur()
+            self.mouse_joint = None
             self.publish_intent()
-            backend = ('controller_move_p' if self.client.execution_backend == 'regularized_move_j'
-                       else 'regularized_move_j')
-            self.client.request_backend(backend)
+            mode = COORDINATE_MODES[(COORDINATE_MODES.index(self.client.coordinate_mode)+1) % 2]
+            self.client.request_coordinate_mode(mode)
         elif name == 'speed':
             self.controls.press('tab')
             self.publish_intent()
@@ -965,6 +992,23 @@ class Window:
             self.client.request('sleep', self.controls.arm)
         elif name == 'menu':
             self.toggle_menu()
+        elif name in ('task_begin', 'task_finish'):
+            self.controls.blur()
+            self.publish_intent()
+            try:
+                if self.demo:
+                    raise ValueError('离线演示不能修改真实任务归档')
+                if (self.client.session or self.client.opening or self.client.stop_pending or
+                        self.client.robot.get('busy') or self.client.robot.get('teleop', {}).get('active')):
+                    raise ValueError('请先退出控制并等待收尾，再新建/结束任务')
+                if name == 'task_begin':
+                    data = self.task_archive.begin()
+                    self.task_notice = '任务已新建：'+data['task_id']
+                else:
+                    data = self.task_archive.finish()
+                    self.task_notice = '任务已结束，结果未知：'+data['task_id']
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.task_notice = '任务归档：'+str(exc)
         elif name == 'record_window':
             if self.recording.status()['state'] == 'recording':
                 self.recording.stop()
@@ -1043,6 +1087,8 @@ class Window:
                     self.toggle_fullscreen()
             elif self.menu_open and name in KEYS:
                 pass  # Typing or holding movement keys over the menu never moves the robot.
+            elif not repeat and name == 'f6':
+                self.activate('coordinates')
             elif not repeat and name in ('1', '2'):
                 self.activate('left' if name == '1' else 'right')
             else:
@@ -1094,10 +1140,17 @@ class Window:
         if gutter:
             self.sidebar_rect = pg.Rect(viewport.right+8, 8, gutter-16, height-16)
             if self.preferences.show_minimap:
-                extra = 44 if self.client.execution_backend == 'controller_move_p' else 0
-                extra += 25 if self.client.robot.get('teleop', {}).get('speed_profile_pending') else 0
+                # Reserve the complete key block (including its text/footer)
+                # above the joint panel. Button rectangles alone miss the
+                # panel background that previously painted over I/J/K/L/O/P.
+                pending = bool(self.client.robot.get('teleop', {}).get('speed_profile_pending'))
+                toolbar_height = 27 + 7*31 + 22 + 5 + (25 if pending else 0)
+                available = height-118-8-self.keys_height()-toolbar_height-10-8
                 self.draw_minimap(pg.Rect(self.sidebar_rect.x, 8, self.sidebar_rect.width,
-                                          min(int(self.sidebar_rect.width*.75)+28, max(80, height-590-extra))))
+                                          min(int(self.sidebar_rect.width*.75)+28, max(40, available))))
+
+    def keys_height(self):
+        return 2*(self.small.get_linesize()+2) + 54 + 28 + 54 + self.small.get_linesize()
 
     def draw_minimap(self, rect):
         pg = self.pg
@@ -1122,6 +1175,7 @@ class Window:
         pg = self.pg
         area = self.sidebar_rect
         x, y, width = area.x+6, (self.minimap_rect.bottom+10 if self.minimap_rect else area.y), area.width-12
+        toolbar_top = y
         profile = {'slow': '慢档', 'normal': '常规档', 'fast': '快档'}[self.controls.speed_profile]
         title = ('左臂' if self.controls.arm == 'left' else '右臂')+' · '+profile
         detour = self.client.robot.get('teleop', {}).get('detour', {})
@@ -1140,11 +1194,11 @@ class Window:
         demonstration = self.demonstration.status()
         demonstration_label = {'recording': '● 示范录制中 / 结束', 'finalizing': '示范保存中…'}.get(
             demonstration['state'], '人类示范 / Codex 参考')
-        backend_label = ('确认停止后切换…' if self.client.pending_backend else
-                         '方案：'+BACKEND_LABELS[self.client.execution_backend])
+        coordinate_label = ('确认停止后切换…' if self.client.pending_coordinate_mode else
+                            self.key_label('f6')+' 坐标：'+COORDINATE_LABELS[self.client.coordinate_mode])
         rows = [(('left', self.key_label('1')+' 左臂'), ('right', self.key_label('2')+' 右臂')),
                 (('open', '进入控制'), ('acknowledge', '现场确认')),
-                (('backend', backend_label),),
+                (('coordinates', coordinate_label),),
                 (('speed', self.key_label('tab')+' '+profile), ('sleep', '回 Sleep')),
                 (('record_window', record_label),),
                 (('demonstrations', demonstration_label),),
@@ -1161,20 +1215,17 @@ class Window:
                 if name == 'demonstrations' and demonstration['state'] == 'recording':
                     pg.draw.rect(self.screen, (235, 80, 70), rect, 2)
             y += 31
-        if self.client.execution_backend == 'controller_move_p':
-            self.text('平移：允许自动调姿', (x, y), (255, 220, 110), self.small)
-            y += 22
-            self.text('原生：无本地自碰撞检查', (x, y), (255, 220, 110), self.small)
-            y += 22
-        if self.client.execution_backend != 'controller_move_p':
-            self.text('本地：无路径自碰撞检查', (x, y), (255, 220, 110), self.small)
-            y += 22
+        self.text('本地 · 无自碰撞检查', (x, y), (255, 220, 110), self.small)
+        y += 22
         self.keys_top = y+5
+        self.toolbar_rect = pg.Rect(area.x, toolbar_top, area.width, self.keys_top-toolbar_top)
 
     def draw_keys(self):
         pg = self.pg
         area = self.sidebar_rect
         x, y, width = area.x+6, self.keys_top, area.width-12
+        self.key_panel_rect = pg.Rect(area.x, y, area.width, self.keys_height())
+        self.key_text_rects = []
         cell = min(30, (width-92)//3)
         pitch = cell+4
         side_x, side_width = x+3*cell+16, width-3*cell-16
@@ -1185,13 +1236,23 @@ class Window:
             held = key in self.controls.keys
             self.panel(rect, (145, 119, 52) if held else (65, 65, 65))
             label = self.key_label(key)
+            compact_label = label
+            if self.client.coordinate_mode == 'base':
+                label += {'w': ' +X', 's': ' −X', 'a': ' +Y', 'd': ' −Y',
+                          'i': ' −Y', 'k': ' +Y', 'j': ' +Z', 'l': ' −Z',
+                          'o': ' −X', 'p': ' +X'}.get(key, '')
+                if self.small.size(label)[0] > w-8:
+                    label = compact_label
             label += {'space': ' ↑', 'lshift': ' ↓', 'q': ' 合', 'e': ' 开', 'o': ' 逆', 'p': ' 顺'}.get(key, '')
             while label and self.small.size(label)[0] > w-8:
                 label = label[:-1]
             self.text(label, (x+(w-self.small.size(label)[0])//2, y+2),
                       (255, 242, 173) if held else (225, 225, 225), self.small)
-        self.text('平移 / 基座升降', (x, y), font=self.small)
-        y += 20
+        def caption(label, top):
+            self.key_text_rects.append(pg.Rect(x, top, width, self.small.get_linesize()))
+            self.text(label, (x, top), font=self.small)
+        caption('平移 · '+COORDINATE_LABELS[self.client.coordinate_mode], y)
+        y += self.small.get_linesize()+2
         cap('w', x+pitch, y)
         for i, key in enumerate(('a', 's', 'd')):
             cap(key, x+i*pitch, y+26)
@@ -1201,20 +1262,21 @@ class Window:
         cap('q', x, y, (width-6)//2)
         cap('e', x+(width-6)//2+6, y, (width-6)//2)
         y += 28
-        self.text('转向 / 侧倾', (x, y), font=self.small)
-        y += 20
+        caption('旋转 · '+COORDINATE_LABELS[self.client.coordinate_mode], y)
+        y += self.small.get_linesize()+2
         cap('i', x+pitch, y)
         for i, key in enumerate(('j', 'k', 'l')):
             cap(key, x+i*pitch, y+26)
         cap('o', side_x, y, side_width)
         cap('p', side_x, y+26, side_width)
-        self.text('F9 停止 · Esc 菜单', (x, y+54), (220, 220, 220), self.small)
+        caption('F9 停止 · Esc 菜单', y+54)
 
     def draw_joint_buttons(self):
         pg = self.pg
         width, height = self.screen.get_size()
         area = self.sidebar_rect or pg.Rect(width-232, 0, 224, height)
         panel = pg.Rect(area.x, height-118, area.width, 110)
+        self.joint_panel_rect = panel
         self.shade(panel, 225, (24, 26, 30))
         local = self.client.execution_backend == 'regularized_move_j'
         active = bool(self.client.session and self.client.robot.get('teleop', {}).get('active'))
@@ -1242,26 +1304,27 @@ class Window:
             else:
                 self.draw_settings()
             return
-        rect = pg.Rect(width//2-230, (height-500)//2, 460, 500)
+        rect = pg.Rect(width//2-230, (height-540)//2, 460, 540)
         self.text('准备中…' if opening else '遥操作菜单', (rect.x+147, rect.y+4), font=self.menu_font)
         rows = [(('resume_view', '返回画面'),),
                 (('open', '进入控制'), ('close', '退出控制')),
                 (('acknowledge', '现场复核后确认停止'),),
-                (('backend', '确认停止后切换…' if self.client.pending_backend else
-                  '控制方案：'+BACKEND_LABELS[self.client.execution_backend]),),
+                (('coordinates', '确认停止后切换…' if self.client.pending_coordinate_mode else
+                  self.key_label('f6')+' 坐标：'+COORDINATE_LABELS[self.client.coordinate_mode]),),
                 (('view', self.key_label('f5')+' 视角：'+('顶视' if self.controls.third_person else '腕部')),
                  ('topmost', self.key_label('f8')+' 置顶：'+('开' if self.always_on_top else '关'))),
                 (('fullscreen', self.key_label('f11')+' 全屏：'+('开' if self.fullscreen else '关')),
                  ('debug', self.key_label('f3')+' 调试：'+('开' if self.show_debug else '关'))),
                 (('keys', '按键 / 设置'), ('demonstrations', '人类示范 / 参考')),
                 (('defaults', '启动默认设置'),),
+                (('task_begin', '新建任务'), ('task_finish', '结束任务（结果未知）')),
                 (('stop', 'F9 · 请求停止'),)]
         for row, items in enumerate(rows):
             size = (rect.width-10*(len(items)-1))//len(items)
             for col, (name, label) in enumerate(items):
                 self.button(name, label, pg.Rect(rect.x+col*(size+10), rect.y+48+row*43, size, 36))
-        self.text('Esc 菜单 · F9 请求停止 · '+self.key_label('tab')+' 切档', (rect.x+65, rect.y+451), font=self.small)
-        self.text('启动只观察 · 菜单打开时暂停按键输入', (rect.x+60, rect.y+476), font=self.small)
+        self.text('Esc 菜单 · F9 请求停止 · '+self.key_label('tab')+' 切档', (rect.x+65, rect.y+494), font=self.small)
+        self.text('启动只观察 · 菜单打开时暂停按键输入', (rect.x+60, rect.y+519), font=self.small)
 
     def draw_demonstrations(self):
         pg = self.pg
@@ -1363,10 +1426,10 @@ class Window:
             tcp = (pose(state) @ self.tool['arms'][self.controls.arm]['T_ee_tcp']).tolist()
         uptime = max(0, int(tick-self.started_at))
         arm = '左臂' if self.controls.arm == 'left' else '右臂'
-        left = ['PIPER CRAFT · '+BACKEND_LABELS[self.client.execution_backend],
+        left = ['PIPER CRAFT · 本地 IK / MOVE_J · '+COORDINATE_LABELS[self.client.coordinate_mode],
                 '%.0f fps · Display: %d x %d' % (self.render_clock.get_fps(), width, height),
                 'Selected: %s · View: %s' % (arm, '顶视' if self.controls.third_person else '腕部'), '',
-                *debug_pose_lines(tcp, policy.get('axis_convention'), self.key_label('w')),
+                *debug_pose_lines(tcp, policy.get('axis_convention'), self.key_label('w'), self.client.coordinate_mode),
                 'Axes: %s %s / %s -Y_tcp' % (self.key_label('w'), '+Z_tcp' if policy.get('axis_convention') == 'piper_tool' else '+X_tcp', self.key_label('d')),
                 'Vertical: %s +Z_base / %s -Z_base' % (self.key_label('space'), self.key_label('lshift')) if policy.get('vertical_frame') == 'base'
                 else 'Vertical: %s %s / %s 反向' % (self.key_label('space'), '-X_tcp' if policy.get('axis_convention') == 'piper_tool' else '+Z_tcp', self.key_label('lshift')),
@@ -1395,7 +1458,7 @@ class Window:
         right = ['Python: '+sys.version.split()[0]+' / SDL: '+'.'.join(map(str, pg.get_sdl_version())),
                  'Controller: '+str(telemetry.get('execution_backend', self.client.execution_backend) if telemetry.get('active') else self.client.execution_backend),
                  'IK: '+str(telemetry.get('ik_solver') or ('controller' if self.client.execution_backend == 'controller_move_p' else policy.get('ik_solver', '—'))),
-                 '检查: '+('无本地自碰撞检查' if self.client.execution_backend == 'controller_move_p' else '入口姿态检查；无路径自碰撞检查'),
+                 '检查: '+('无本地自碰撞检查' if self.client.execution_backend == 'controller_move_p' else '无本地自碰撞检查'),
                  'Control: '+str(telemetry.get('phase', 'observing'))+' / '+str(telemetry.get('owner') or '无控制者'),
                  'Status: '+('准备中…' if self.client.opening else phase_label),
                  'Stop: '+stop, '',
@@ -1489,6 +1552,8 @@ class Window:
             current['窗口'] = (self.window_notice, (255, 220, 100))
         if self.settings_notice:
             current['设置'] = (self.settings_notice, (255, 220, 100))
+        if self.task_notice:
+            current['任务'] = (self.task_notice, (190, 220, 190))
         recording_error = self.recording_notice or self.recording.status()['error']
         if recording_error:
             current['录像'] = ('窗口录像失败：'+recording_error, (255, 100, 100))
@@ -1568,6 +1633,8 @@ class Window:
         self.draw_scene(frame)
         state = robot.get('arms', {}).get(self.controls.arm, {})
         self.key_rects = {}
+        self.key_text_rects = []
+        self.key_panel_rect = self.toolbar_rect = self.joint_panel_rect = None
         if self.show_hud and self.sidebar_rect:
             self.draw_toolbar()
             self.draw_keys()

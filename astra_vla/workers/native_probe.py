@@ -20,6 +20,10 @@ def pose_sdk(transform):
 
 class NativeProbe:
     def configure_native_probe(self, args, arm):
+        # User disabled both the production MOVE_P backend and legacy probe.
+        # Reject before any preparation, enable, geometry job or SDK write.
+        if args.get('native_pose_probe') or args.get('execution_backend') == 'controller_move_p':
+            raise ValueError('控制器原生 MOVE_P 已禁用；请使用本地 IK / MOVE_J')
         enabled = args.get("native_pose_probe", False)
         if not isinstance(enabled, bool):
             raise ValueError("native probe flag must be boolean")

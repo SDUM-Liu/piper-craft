@@ -16,5 +16,6 @@
   "axis_convention": "piper_tool",
   "ik_solver": "casadi_ipopt",
   "vertical_frame": "base",
-  "gripper_opening_lead_m": 0.003
+  "gripper_opening_lead_m": 0.003,
+  "coordinate_mode": "base"
 }

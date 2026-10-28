@@ -27,7 +27,7 @@ def run_model_script(script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_recovery_uses_joint_bounds_without_collision_queries_or_correction_budget():
+def test_recovery_delegates_all_physical_joint_bounds_to_controller():
     run_model_script(r'''
 import copy,json,math,numpy as np
 from dataclasses import asdict
@@ -68,16 +68,19 @@ assert check_recovery_target(k,s,larger,s['joints_rad'])
 origin=np.array(s['joints_rad']);origin[0]+=math.radians(4)
 validated_recovery_plan(p,s,policy,origin)
 lower,upper=recovery_joint_bounds(k)
-assert np.array_equal(lower,k.model.lowerPositionLimit[:6])
-assert np.array_equal(upper[[0,1,2,3,5]],original_upper[[0,1,2,3,5]])
-bad=copy.deepcopy(s);bad['joints_rad'][4]=math.radians(-73.683)
-try:plan_recovery(k,bad,s,g,policy)
-except ValueError as exc:assert 'J5=' in str(exc)
-else:raise AssertionError('unrelated J5 lower bound removed')
-# Ordinary entry/keyboard control continues to invoke the same collision guard.
-try:teleop.geometry_hold(s,g)
-except AssertionError as exc:assert 'collision checker' in str(exc)
-else:raise AssertionError('ordinary hold bypassed local collisions')
+assert np.all(lower < -10000) and np.all(upper > 10000)
+for j,angle in ((4,-73.683),(5,-145.0),(5,145.0)):
+ bad=copy.deepcopy(s);bad['joints_rad'][j]=math.radians(angle)
+ plan=plan_recovery(k,bad,s,g,policy)
+ assert plan['required'] and plan['joint_sdk'][j]==round(angle*1000)
+ for row in plan['stage_joint_sdk']:
+  assert row[j]==round(angle*1000)
+# Entry also skips local self-collision queries after the 10-28 request.
+assert teleop.geometry_hold(s,g) is True
+bad=copy.deepcopy(s);bad['joints_rad'][0]=float('nan')
+try:teleop.geometry_hold(bad,g)
+except ValueError as exc:assert 'feedback' in str(exc)
+else:raise AssertionError('nonfinite feedback accepted')
 ''')
 
 
@@ -93,7 +96,7 @@ k.contacts=k.recovery_contacts=k.bounded_gripper_contacts=forbidden
 s={'arm':'left','joints_rad':np.deg2rad([0,-2.,.8,0,20,0]).tolist(),
  'gripper':{'width_m':.03,'faults':[]},'ee_pose':{'position_m':[.1,0,.2],'rpy_deg':[0,70,0]},
  'controller':{'ctrl_mode':0,'move_mode':0,'motors_enabled':[False]*6,'err_code':0,'arm_status':0}}
-for change in ('large','wrist','enabled','teach','partial','fault','gripper_fault',
+for change in ('enabled','teach','partial','fault','gripper_fault',
                'disabled_policy','selective','nan'):
  bad=copy.deepcopy(s);p=policy
  if change=='large':bad['joints_rad'][1]=np.deg2rad(-3.001)
@@ -116,7 +119,8 @@ assert not plan_recovery(k,ordinary,s,g,policy)['required']
 try:plan_recovery(k,s,s,{},policy)
 except ValueError as exc:assert 'robot-local' in str(exc)
 else:raise AssertionError('retired workspace recovery accepted')
-for packet in ([0]*5,[False]*6,[0.]*6,[0,-1,-500,0,20000,0]):
+assert check_recovery_target(k,s,[0,-1,-500,0,-80000,150000],s['joints_rad'])
+for packet in ([0]*5,[False]*6,[0.]*6,[0,0,0,0,0,2**31]):
  try:check_recovery_target(k,s,packet,s['joints_rad'])
  except ValueError:pass
  else:raise AssertionError('invalid/out-of-range packet accepted')

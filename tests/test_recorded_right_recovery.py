@@ -73,8 +73,11 @@ validated_recovery_plan(rebound,held,policy,s['joints_rad'])
 assert np.max(np.abs(np.array(rebound['goal_joints_rad'])-held['joints_rad']))>np.deg2rad(9.)
 for target in rebound['stage_joint_sdk']:
  assert check_recovery_target(k,held,target,s['joints_rad'])
+# Nominal URDF angles no longer reject valid CAN packets.
 bad=rebound['joint_sdk'].copy();bad[3]=200000
+assert check_recovery_target(k,held,bad,s['joints_rad'])
+bad[3]=2**31
 try:check_recovery_target(k,held,bad,s['joints_rad'])
-except ValueError as exc:assert 'joint bounds' in str(exc)
-else:raise AssertionError('recovery joint bounds removed')
+except ValueError as exc:assert 'packet' in str(exc)
+else:raise AssertionError('CAN integer overflow accepted')
 ''')

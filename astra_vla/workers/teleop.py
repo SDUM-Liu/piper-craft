@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import multiprocessing
@@ -16,7 +16,7 @@ import numpy as np
 
 from astra_vla.config import ROOT, RUNTIME, settings, tcp_configuration, atomic_json
 from astra_vla.rpc import RPCError, call
-from astra_vla.teleop import Integrator, JOINT_KEYS, Policy, SPEED_PROFILES, keyset, pose, rotation_error
+from astra_vla.teleop import COORDINATE_MODES, Integrator, JOINT_KEYS, Policy, SPEED_PROFILES, keyset, pose, rotation_error
 from astra_vla.teleop_detour import DetourPolicy
 from astra_vla.workers.detour_control import DetourControl
 from astra_vla.workers.native_probe import NativeProbe
@@ -141,17 +141,12 @@ def native_feedback(state, geometry):
 
 
 def geometry_hold(state, geometry=None, other_state=None):
-    """Check a local joint hold; no camera/workspace transform is involved."""
+    """Validate measured/quantized feedback, without local collision queries."""
     _geometry_model.check_hold(state)
     rounded = dict(state, joints_rad=np.deg2rad(
         np.rint(np.rad2deg(state['joints_rad']) * 1000) / 1000).tolist())
     _geometry_model.check_hold(rounded)
-    if geometry is not None and geometry.get('scope') == 'tcp_jog':
-        for measured in (state, rounded):
-            if _geometry_model.bounded_gripper_contacts(_geometry_model.configuration(measured),
-                                                       geometry.get('unverified_gripper_max_m')):
-                raise ValueError('unverified gripper envelope has URDF self collision')
-    elif geometry is not None:
+    if geometry is not None and geometry.get('scope') != 'tcp_jog':
         raise ValueError('PIPER CRAFT hold requires robot-local geometry')
     return True
 
@@ -201,7 +196,11 @@ def camera_fingerprint(cameras):
 class Trace:
     """Command evidence, explicitly separate from video and physical acceptance."""
     def __init__(self, session, arm, policy):
+        from astra_vla.task_archive import TaskArchive
         self.session, self.arm, self.policy = session, arm, policy
+        self.archive = TaskArchive(ROOT)
+        self.artifact_path = self.archive.reserve(
+            'teleop_' + time.strftime('%Y%m%d_%H%M%S') + '_' + session[:8], 'teleop', arm=arm)
         self.buffer = deque(maxlen=512)
         self.path = None
         self.lock = threading.Lock()
@@ -220,7 +219,7 @@ class Trace:
             self.check()
             if self.activated:
                 return
-            self.path = ROOT / 'runs' / ('teleop_' + time.strftime('%Y%m%d_%H%M%S') + '_' + self.session[:8])
+            self.path = self.artifact_path
             self.activated = True
             self.pending.extend(self.buffer)
             self.buffer.clear()
@@ -233,6 +232,7 @@ class Trace:
             atomic_json(self.path / 'manifest.json', {'kind': 'teleop_command_trace', 'session': self.session,
                 'arm': self.arm, 'policy': asdict(self.policy), 'hardware_acceptance_complete': False,
                 'physical_accuracy_verified': False, 'video_recorded': False,
+                'task_id': self.path.parent.parent.name,
                 **getattr(self, 'context', {})})
             with (self.path / 'events.jsonl').open('a') as stream:
                 while True:
@@ -249,6 +249,10 @@ class Trace:
                     self.changed.wait(.05)
         except Exception as exc:
             self.error = str(exc)
+            try:
+                self.archive.update(self.artifact_path, state='error', error=self.error)
+            except Exception:
+                pass  # Preserve the original writer fault when storage itself is unavailable.
 
     def record(self, kind, **data):
         row = {'type': kind, 'stamp': time.time(), 'monotonic': time.monotonic(), **data}
@@ -265,6 +269,7 @@ class Trace:
     def close(self, result):
         with self.lock:
             if not self.activated:
+                self.archive.update(self.artifact_path, discard=True)
                 return
             self.closing = True
             self.changed.set()
@@ -278,6 +283,7 @@ class Trace:
             record_session(self.path, result, directory=ROOT/'docs/memory')
         except Exception as exc:
             atomic_json(self.path/'memory_error.json', {'error': str(exc)})
+        self.archive.update(self.path, state='closed', result=result, finished_at=time.time())
 
 
 class TeleopController(NativeProbe, SleepReturn, DetourControl):
@@ -313,6 +319,7 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
         self.native_pose_probe = False
         self.native_control = False
         self.execution_backend = 'regularized_move_j'
+        self.policy = self.base_policy = Policy.load()
         self.recovery = None
         self.key_feedback = KeyStepFeedback()
         self.detour_policy = DetourPolicy.load()
@@ -383,14 +390,15 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                     'execution_backend': 'controller_move_p' if self.native_control else 'regularized_move_j',
                     'control_frame': 'joint' if joint_jog or sleep_joint else 'tcp',
                     'joint_jog': joint_jog,
-                    'vertical_frame': self.policy.vertical_frame if hasattr(self, 'policy') else None,
+                    'vertical_frame': 'base' if self.policy.coordinate_mode == 'base' else 'tcp',
+                    'coordinate_mode': self.policy.coordinate_mode,
                     'ik_solver': ('sleep_joint_return' if sleep_joint else 'joint_jog' if joint_jog else 'controller' if self.native_control else
                                   self.policy.ik_solver if hasattr(self, 'policy') else None),
                     'path_precheck': 'none', 'path_collision_check': False,
                     'follow_mode': self.policy.follow_mode if hasattr(self, 'policy') else None,
                     'sdk_speed_percent_effective': True if hasattr(self, 'policy') else None,
                     'mode_feedback_verified': False,
-                    'collision_scope': 'none' if self.native_control else 'entry_hold_only',
+                    'collision_scope': 'none',
                     'joint_position_limits': 'controller',
                     'environment_guard': False, 'other_arm_guard': False,
                     'blocker': self.reason, 'termination_reason': getattr(self, 'termination_reason', None),
@@ -515,6 +523,10 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                 self.owner = 'desktop'
                 self.preparation_cancel_supported = args.get('preparation_cancel_supported') is True
                 self.base_policy = Policy.load()
+                mode = args.get('coordinate_mode', self.base_policy.coordinate_mode)
+                if mode not in COORDINATE_MODES:
+                    raise ValueError('unknown teleop coordinate mode')
+                self.base_policy = replace(self.base_policy, coordinate_mode=mode)
                 if self.base_policy.speed_profile != 'normal':
                     raise ValueError('base configuration must use normal speed profile')
                 profile = (args.get('speed_profile', 'normal'))
@@ -622,13 +634,14 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                     self.deadline_misses = 0
                     self.trace = self.trace_factory(self.session, arm, self.policy)
                     self.trace.context = {'tool': self.tool, 'control_frame': ('tcp'),
+                        'coordinate_mode': self.policy.coordinate_mode,
                         'owner': self.owner, 'execution_backend': 'controller_move_p' if self.native_control else 'regularized_move_j',
                         'native_pose_probe': self.native_pose_probe,
                         'automatic_orientation': bool(self.native_control and not self.native_pose_probe),
                         'controller_limits': ({key: self.native_limits[key] for key in ('source', 'complete', 'limits')}
                                               if self.native_control and not self.native_pose_probe else None),
                         'path_precheck': 'none', 'path_collision_check': False,
-                        'collision_scope': 'none' if self.native_control else 'entry_hold_only',
+                        'collision_scope': 'none',
                         'joint_position_limits': 'controller',
                         'environment_guard': False, 'other_arm_guard': False,
                         'configuration_token': self.token}
@@ -697,6 +710,8 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                 return {'accepted': False, 'sequence': self.sequence}
             if args.get('execution_backend', self.execution_backend) != self.execution_backend:
                 raise ValueError('exit control and confirm stop before changing execution backend')
+            if args.get('coordinate_mode', self.policy.coordinate_mode) != self.policy.coordinate_mode:
+                raise ValueError('exit control and confirm stop before changing coordinate mode')
             if self.native_control and keys & JOINT_KEYS:
                 raise ValueError('关节点动请先切换到本地方案')
             profile = args.get('speed_profile', self.requested_speed_profile)
