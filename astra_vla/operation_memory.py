@@ -173,6 +173,10 @@ def main():
     planning.add_argument('--instruction', required=True)
     planning.add_argument('--scene-id', default='')
     planning.add_argument('--demo-offset', type=int, default=0)
+    from astra_vla.grasp_guidance import STAGES, review_stage
+    grasp = sub.add_parser('grasp-review', help='Check a desktop grasp stage; never sends motion')
+    grasp.add_argument('--stage', choices=[s['id'] for s in STAGES], required=True)
+    grasp.add_argument('--review', type=Path, required=True)
     context = sub.add_parser('context')
     context.add_argument('--observed', required=True)
     context.add_argument('--evidence', default='')
@@ -185,7 +189,10 @@ def main():
         record.add_argument('--'+field, default='')
     record.add_argument('--status', default='open', choices=['open','software_verified','hardware_verified','resolved'])
     args = parser.parse_args()
-    if args.command == 'planning-context':
+    if args.command == 'grasp-review':
+        result = review_stage(args.stage, json.loads(args.review.read_text()))
+        print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    elif args.command == 'planning-context':
         from astra_vla.task_memory import TaskMemory
         print(json.dumps(TaskMemory(args.directory).context(args.instruction, args.scene_id, args.demo_offset), ensure_ascii=False))
     elif args.command == 'check':

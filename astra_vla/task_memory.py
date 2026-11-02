@@ -28,11 +28,23 @@ REUSE_CHECKS = (
     "reference_limits",
 )
 PLANNING_FOCUS = {
+    "reuse_efficiency": "10-29用户要求：有真实成功案例的任务，第二次必须以比第一次更快完成为目标，"
+    "尽可能复用已验证的分工、抓点、朝向、视角和阶段策略，减少无效试探、重复摸索与无必要等待。"
+    "先评估当次适用范围，写明复用内容与可减少步骤；保留必要现场观察、抓持复核及既有守护，不重放旧轨迹。"
+    "按相同任务范围、起止点和完成判据比较实际用时；无可比计时则注明未知并建立基线，"
+    "部分成功不充当完整任务基准，未实测不宣称提速，不以单纯调快机械臂代替经验复用。",
+    "grasp_alignment": "10-29用户反复指出夹取朝向与位置问题：接近前在grasp项明确夹爪进夹方向、"
+    "双指闭合方向相对物体轴线的关系，以及具体抓取部位、位置/高度，兼顾提起、转向、插入/倾倒与撤爪需要。"
+    "羽毛球区分球头与羽毛，球筒区分筒身与筒沿；画面居中不等于朝向、抓点或接触正确。"
+    "闭爪前用新鲜顶视/双腕交叉核查，并独立检查入夹程度；关键关系不清先补观察/调整。"
+    "短提未带起或滑转时重评方向、抓点、两侧接触和夹深，不盲目继续收爪、下降或重复试提。",
     "local_action_plan": "每个实体任务开始前规划一组局部动作，每轮只列接下来1–3个动作。"
     "先用常识核对物体功能与方向（羽毛球必须球头先入筒）、开口/封底、承托和释放顺序；"
     "每步写明目标、前置事实、控制臂/坐标模式/轴方向、抓持与间隙细节、观察视角、"
     "完成判据和异常停退条件。小步执行后按真实结果更新下一组；不以截图投影、SDK到位或旧轨迹代替实物判断。",
     "observation_views": "逐阶段写明顶视、操作腕和另一腕各看清什么、哪里遮挡；"
+    "桌面夹取仅抓取臂工具+Z垂直向下；辅助腕在保持双臂/桌面间隙、避开遮挡的前提下尽可能低位侧看，"
+    "确认指尖、物体、桌面的高度及入夹关系，不要求辅助腕朝下俯视；顶视看平面布局，低位侧视不等于仰视。"
     "未选中臂的腕相机也须主动查看。抓前、试提/短移后、倾倒/插入前及释放前重新核查。"
     "关键接触/高度看不清先暂停、补观察；调整观察臂仍须新RGB/双臂反馈和普通运动保护。",
     "grasp_depth": "闭爪前用腕部近视与可用辅助侧视交叉检查物体进入双指的程度、"
@@ -40,6 +52,10 @@ PLANNING_FOCUS = {
     "并非越深越好，不盲推到底。试提/短移后复查相对滑移/转动。"
     "开度、effort、SDK末端或已提起不能证明夹深/保持力；未知写未知，"
     "无标定不报毫米深度，不跨瓶身/球头/筒身套用旧抓点。",
+    "desktop_grasp": "10-30桌面抓取按desktop_grasp_guide顺序核查：另一臂避让/尽可能低位辅助侧视→"
+    "仅抓取臂工具+Z垂直向下、张爪到上方→基坐标下降并由辅助腕侧视核高度→核对O/P实际倾斜及闭合方向→"
+    "辅助腕确认入夹深度和指尖间隙→闭爪低位试提。方向/高度/夹深未知先补观察。"
+    "基坐标O/P绕∓X、J/L绕±Z，不能混称；仰视暂不纳入。该流程为用户要求，不是新增成功案例。",
 }
 REASONS = ("reference_failure", "outdated", "invalid", "success_revoked")
 
@@ -167,7 +183,9 @@ class TaskMemory:
         lines += [
             "",
             "复用评估：" + " / ".join(REUSE_CHECKS) + "。",
-            "- 局部动作规划：" + PLANNING_FOCUS["local_action_plan"],
+            "- 成功经验复用与提速：" + PLANNING_FOCUS["reuse_efficiency"],
+            "- 夹爪朝向与抓取位置：" + PLANNING_FOCUS["grasp_alignment"],
+            "- 局部动作规划及桌面抓取：" + PLANNING_FOCUS["local_action_plan"] + PLANNING_FOCUS["desktop_grasp"],
             "- 腕部辅助视角：" + PLANNING_FOCUS["observation_views"],
             "- 抓夹深度：" + PLANNING_FOCUS["grasp_depth"],
             "清理运行记录不删除经验。结论被推翻、参考过时/到期或导致失败时修正或移除；不保留失败路线。",
@@ -500,6 +518,8 @@ class TaskMemory:
         return result
 
     def context(self, instruction, scene_id="", demo_offset=0):
+        from astra_vla.grasp_guidance import guide
+
         self.compact()
         state, result = self.read(), []
         for graph in state["maps"]:
@@ -541,12 +561,16 @@ class TaskMemory:
                 )
             )
         demonstrations = self.demonstrations(offset=demo_offset, limit=33)
+        memory_path = self.directory / 'state.json'
+        operation_state = json.loads(memory_path.read_text()) if memory_path.exists() else {}
         return dict(
             instruction=instruction,
             scene_id=scene_id,
             reference_only=True,
             reuse_checks=list(REUSE_CHECKS),
             planning_focus=copy.deepcopy(PLANNING_FOCUS),
+            desktop_grasp_guide=guide(),
+            problem_lessons=operation_state.get('problems', [])[-8:],
             maps=result,
             demonstrations=demonstrations[:32],
             next_demo_offset=demo_offset+32 if len(demonstrations) > 32 else None,
