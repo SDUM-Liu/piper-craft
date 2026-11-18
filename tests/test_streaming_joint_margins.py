@@ -42,6 +42,7 @@ for index,value in [(3,97.077),(3,100.01),(3,-100.01),(4,70.01),
  goal=np.array(checked['goal_joints_rad'])
  assert sign*(goal[index]-current[index])>math.radians(.005),(index,value,goal)
  assert checked['joint_limit_status']==[] and checked['joint_position_limits']=='controller'
+ assert not checked['detour_recommended'], 'nominal limits must not divert a feasible ordinary jog'
  if index!=3 or abs(value)>100:
   assert goal[index]<k.model.lowerPositionLimit[index] or goal[index]>k.model.upperPositionLimit[index]
  assert max(abs(np.rad2deg(checked['velocity'])))<=policy.joint_acceleration_deg_s2/policy.control_hz+1e-8
@@ -49,6 +50,7 @@ for index,value in [(3,97.077),(3,100.01),(3,-100.01),(4,70.01),
  again=k.teleop_step(s,s,np.array(checked['tcp_target']),g,.03,asdict(policy),
                      [0.]*6,validated_goal=checked)
  assert again['joint_sdk']==checked['joint_sdk'] and k.regularized_teleop_ik is None
+ assert not again['detour_recommended']
  k.regularized_teleop_ik=solver
  assert s==saved
 # Crossing the actual URDF J4 endpoint must pass the full sampled path too.

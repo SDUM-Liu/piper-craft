@@ -324,6 +324,7 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
         self.key_feedback = KeyStepFeedback()
         self.detour_policy = DetourPolicy.load()
         self.sleep_return = {'state': 'idle'}
+        self.joint_target = {'state': 'idle'}
         self.reset_detour()
 
     def token_value(self):
@@ -382,17 +383,18 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
             target_hz = sum(0 <= now-stamp <= 1 for stamp in getattr(self, 'target_stamps', ()))
             joint_jog = next(iter(getattr(self, 'keys', frozenset()) & JOINT_KEYS), None)
             sleep_joint = bool(self.detour_context and self.detour_context.get('kind') == 'sleep')
+            joint_target = bool(self.detour_context and self.detour_context.get('kind') == 'joint_target')
             return {'active': self.active, 'owner': self.owner if self.owns_lock else None,
                     'session': self.session, 'arm': self.arm, 'phase': self.phase,
                     'native_pose_probe': self.native_pose_probe,
                     'automatic_orientation': bool(self.native_control and not self.native_pose_probe),
                     'orientation_adjustment_deg': getattr(self, 'native_adjustment_deg', 0.),
                     'execution_backend': 'controller_move_p' if self.native_control else 'regularized_move_j',
-                    'control_frame': 'joint' if joint_jog or sleep_joint else 'tcp',
+                    'control_frame': 'joint' if joint_jog or sleep_joint or joint_target else 'tcp',
                     'joint_jog': joint_jog,
                     'vertical_frame': 'base' if self.policy.coordinate_mode == 'base' else 'tcp',
                     'coordinate_mode': self.policy.coordinate_mode,
-                    'ik_solver': ('sleep_joint_return' if sleep_joint else 'joint_jog' if joint_jog else 'controller' if self.native_control else
+                    'ik_solver': ('joint_target' if joint_target else 'sleep_joint_return' if sleep_joint else 'joint_jog' if joint_jog else 'controller' if self.native_control else
                                   self.policy.ik_solver if hasattr(self, 'policy') else None),
                     'path_precheck': 'none', 'path_collision_check': False,
                     'follow_mode': self.policy.follow_mode if hasattr(self, 'policy') else None,
@@ -418,6 +420,9 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                     'gravity_recovery': self.recovery,
                     'detour': self.detour_status(),
                     'sleep_return': dict(self.sleep_return),
+                    'joint_target': dict(self.joint_target),
+                    'fast_profile_enabled': False,
+                    'tcp_drift_check': False,
                     'speed_profile': getattr(self, 'requested_speed_profile', 'normal'),
                     'speed_profile_active': self.policy.speed_profile if hasattr(self, 'policy') else 'normal',
                     'speed_profile_pending': getattr(self, 'pending_speed_profile', None),
@@ -611,6 +616,8 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                     self.keys, self.accepted_keys = frozenset(), frozenset()
                     self.cancel_automatic = False
                     self.sleep_return = {'state': 'idle'}
+                    self.joint_target = {'state': 'idle'}
+                    self.last_joint_target_sequence = -1
                     self.detour_policy = DetourPolicy.load()
                     self.reset_detour()
                     self.sequence, self.generation = -1, 0
@@ -717,6 +724,8 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
             profile = args.get('speed_profile', self.requested_speed_profile)
             if self.native_pose_probe and (profile != 'slow' or keys & {'q', 'e'}):
                 raise ValueError('native probe permits slow arm-only motion')
+            if profile == 'fast':
+                raise ValueError('快档已临时禁用')
             if profile not in SPEED_PROFILES:
                 raise ValueError('unknown teleop speed profile')
             # Validate the complete effective policy before accepting a switch.
@@ -727,8 +736,9 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                 keys = frozenset()  # No held key can accelerate on a gear change.
             previous = self.keys
             self.cancel_automatic = bool(args.get('cancel_detour', False))
-            if self.sleep_return['state'] == 'settling' and (keys or changing_profile or self.cancel_automatic):
-                self.sleep_return['state'] = 'cancelled'
+            for route in (self.sleep_return, self.joint_target):
+                if route['state'] == 'settling' and (keys or changing_profile or self.cancel_automatic):
+                    route['state'] = 'cancelled'
             # A fixed detour owns its endpoint after triggering. Releasing the
             # initiating keys keeps it running, with a live focused heartbeat.
             auto_release = bool(self.detour_context is not None and not keys and not changing_profile
@@ -828,8 +838,9 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
     def invalidate(self, reason):
         with self.mutex:
             self.reset_detour()
-            if self.sleep_return['state'] == 'settling':
-                self.sleep_return['state'] = 'cancelled'
+            for route in (self.sleep_return, self.joint_target):
+                if route['state'] == 'settling':
+                    route['state'] = 'cancelled'
             first = getattr(self, 'termination_reason', None) is None
             if first:
                 self.termination_reason = reason
@@ -1050,14 +1061,16 @@ class TeleopController(NativeProbe, SleepReturn, DetourControl):
                     self.integrator.rotating = True
                 self.phase = 'ready'
                 self.last_confirmation = {'confirmed': True}
-                if self.sleep_return['state'] == 'settling':
-                    reached = np.max(np.abs(np.asarray(state['joints_rad']) -
-                                            self.sleep_return['goal_joints_rad'])) <= np.deg2rad(.1)
-                    self.sleep_return['state'] = 'completed' if reached else 'blocked'
-                    self.reason = ('已回到 Sleep，SDK关节到位并确认静止；保持使能' if reached else
-                                   'Sleep 静止确认时关节偏离目标；请重新观察后请求回位')
-                    self.trace.record('sleep_completed' if reached else 'sleep_blocked', state=before,
-                                      target=self.sleep_return['joint_sdk'])
+                for kind, route in (('sleep', self.sleep_return), ('joint_target', self.joint_target)):
+                    if route['state'] == 'settling':
+                        reached = np.max(np.abs(np.asarray(state['joints_rad']) -
+                                                route['goal_joints_rad'])) <= np.deg2rad(.1)
+                        route['state'] = 'completed' if reached else 'blocked'
+                        label = '回 Sleep' if kind == 'sleep' else '关节角度控制'
+                        self.reason = (label + '完成，SDK关节到位并确认静止；保持使能' if reached else
+                                       label + '静止确认时关节偏离目标；重新观察后请求')
+                        self.trace.record(kind + ('_completed' if reached else '_blocked'), state=before,
+                                          target=route['joint_sdk'])
                 self.capture_key_feedback(state, settled=True)
         if not keys and self.detour_context is None:
             return

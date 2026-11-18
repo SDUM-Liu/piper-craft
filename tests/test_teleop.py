@@ -85,8 +85,8 @@ def test_rotation_anchor_survives_key_changes_and_feedback_noise():
     p = integrator.propose(s, keyset(['j']), .05, .065, keyset(['i']))
     np.testing.assert_allclose(p['tcp_target'][:3, 3], anchor)
     s['ee_pose']['position_m'][0] += .003
-    with pytest.raises(RuntimeError, match='drift'):
-        integrator.propose(s, keyset(['i']), .05, .065)
+    # Drift no longer faults the session; independent following limits may wait.
+    assert integrator.propose(s, keyset(['i']), .05, .065) is None
 
 
 def test_no_time_debt_and_lead_bound():
@@ -166,7 +166,7 @@ def test_invalid_policy(values):
         Policy(**values)
 
 
-@pytest.mark.parametrize('profile', ['slow', 'normal', 'fast'])
+@pytest.mark.parametrize('profile', ['slow', 'normal'])
 def test_commanded_speed_has_no_application_ceiling(profile):
     from dataclasses import replace
     policy = replace(Policy().for_speed(profile), translation_m_s=.3,
@@ -1218,7 +1218,7 @@ def test_gripper_opening_allowance_and_effort_are_still_bounded(values):
         Policy(**values)
 
 
-@pytest.mark.parametrize('profile', ['normal', 'fast'])
+@pytest.mark.parametrize('profile', ['normal', 'slow'])
 def test_held_q_stalled_feedback_keeps_closing_to_zero_at_same_speed_and_effort(profile):
     policy = Policy(ik_solver='casadi_ipopt').for_speed(profile)
     measured = state()
@@ -1829,14 +1829,14 @@ def test_stop_during_ordinary_mode_refresh_prevents_following_target(controller)
 
 
 @pytest.mark.parametrize('profile,hz,speed,lead', [('slow', 20, .005, .002),
-    ('normal', 20, .02, .002), ('fast', 50, .1, .008)])
+    ('normal', 20, .02, .002)])
 def test_manual_profile_limits_preserve_joint_motion_guards(profile, hz, speed, lead):
     base = Policy(ik_solver='casadi_ipopt', translation_m_s=.02,
                   joint_acceleration_deg_s2=120, joint_lead_deg=2)
     p = base.for_speed(profile)
     assert (p.control_hz, p.translation_m_s, p.position_lead_m) == (hz, speed, lead)
     assert p.joint_acceleration_deg_s2 == 120
-    assert p.tcp_drift_m == .002 and p.rotation_lead_deg == .5
+    assert not hasattr(p, 'tcp_drift_m') and p.rotation_lead_deg == .5
     assert p.geometry_timeout_s < 1/p.control_hz
 
 
@@ -1852,10 +1852,10 @@ def test_switching_speed_drops_held_keys_and_waits_for_quiet_before_changing_lim
     monkeypatch.setattr(Policy, 'load', lambda: Policy(ik_solver='casadi_ipopt'))
     opened = f.manager.open({'arm': 'left'})
     f.manager.input({'session': opened['session'], 'sequence': 0, 'keys': ['w']})
-    f.manager.input({'session': opened['session'], 'sequence': 1, 'keys': ['w'], 'speed_profile': 'fast'})
+    f.manager.input({'session': opened['session'], 'sequence': 1, 'keys': ['w'], 'speed_profile': 'slow'})
     assert not f.manager.keys
     assert f.manager.policy.speed_profile == 'normal'
-    assert f.manager.pending_speed_profile == 'fast' and f.manager.phase == 'pausing'
+    assert f.manager.pending_speed_profile == 'slow' and f.manager.phase == 'pausing'
     f.manager.step()
     assert f.manager.policy.speed_profile == 'normal'
     f.clock[0] += .51
@@ -1863,13 +1863,13 @@ def test_switching_speed_drops_held_keys_and_waits_for_quiet_before_changing_lim
         frame['stamp'] = f.clock[0]
     f.manager.last_input = f.clock[0]
     f.manager.step()
-    assert f.manager.policy.speed_profile == 'fast'
-    assert f.manager.policy.control_hz == 50
+    assert f.manager.policy.speed_profile == 'slow'
+    assert f.manager.policy.control_hz == 20
     assert not f.manager.keys and f.manager.phase == 'ready'
     assert not any(method == 'JointCtrl' for _, method, _ in f.commands)
 
 
-@pytest.mark.parametrize('profile', ['slow', 'normal', 'fast'])
+@pytest.mark.parametrize('profile', ['slow', 'normal'])
 @pytest.mark.parametrize('drift', [.00218, .0101, .05])
 def test_release_displacement_is_recorded_without_distance_limit(controller, monkeypatch, profile, drift):
     f = controller
@@ -1885,14 +1885,11 @@ def test_release_displacement_is_recorded_without_distance_limit(controller, mon
     assert not any(method == 'JointCtrl' for _, method, _ in f.commands)
 
 
-@pytest.mark.parametrize('field,value', [('input_timeout_s', .101), ('geometry_timeout_s', .019),
-    ('joint_lead_deg', 6.01), ('position_lead_m', .0081),
-    ('joint_acceleration_deg_s2', 120.1)])
-def test_fast_profile_cannot_exceed_declared_motion_and_stop_caps(field, value):
-    from dataclasses import replace
-    fast = Policy(ik_solver='casadi_ipopt').for_speed('fast')
-    with pytest.raises(ValueError):
-        replace(fast, **{field: value})
+def test_fast_profile_is_temporarily_disabled():
+    with pytest.raises(ValueError, match='快档已临时禁用'):
+        Policy().for_speed('fast')
+    with pytest.raises(ValueError, match='快档已临时禁用'):
+        Policy(speed_profile='fast')
 
 
 def test_speed_config_change_invalidates_session_token(tmp_path, monkeypatch):
@@ -1909,45 +1906,24 @@ def test_speed_config_change_invalidates_session_token(tmp_path, monkeypatch):
     path = folder/'teleop_speeds.json'
     path.write_text(json.dumps({'slow': {}, 'normal': {}, 'fast': {'translation_m_s': .08}}))
     assert token != teleop.configuration_token()
-    assert Policy(ik_solver='casadi_ipopt').for_speed('fast').translation_m_s == .08
+    assert Policy(ik_solver='casadi_ipopt').for_speed('normal').translation_m_s == .005
     path.write_text(json.dumps({'slow': {}, 'normal': {}, 'fast': {'release_extra_m': .02}}))
     with pytest.raises(ValueError):
-        Policy(ik_solver='casadi_ipopt').for_speed('fast')
+        Policy(ik_solver='casadi_ipopt').for_speed('normal')
 
 
-def test_fast_worker_sends_ordinary_mode_with_validated_goal_under_twenty_ms_period(controller, monkeypatch):
+def test_fast_requests_are_rejected_at_open_and_during_control(controller):
     f = controller
-    monkeypatch.setattr(Policy, 'load', lambda: Policy(ik_solver='casadi_ipopt', speed_percent=20))
-    opened = f.manager.open({'arm': 'left', 'speed_profile': 'fast'})
-    submitted = []
-    def submit(function, *args):
-        submitted.append(args)
-        def result(**kwargs):
-            tcp_target = np.asarray(args[2]) @ np.asarray(args[3]['tcp'])
-            return {'reachable': True, 'joint_sdk': [0]*6, 'velocity': [0.]*6, 'samples': 11,
-                    'tcp_target': tcp_target.tolist(), 'ik': {'solver': 'casadi_ipopt', 'progress_fraction': 1.}}
-        return SimpleNamespace(result=result, cancel=lambda: None)
-    f.robot.geometry_pool.submit = submit
-    for seq in range(2):
-        f.manager.input({'session': opened['session'], 'sequence': seq, 'keys': ['w'], 'speed_profile': 'fast'})
-        f.manager.step()
-        f.clock[0] += .02
-    assert all(args[-3]['control_hz'] == 50 and args[-3]['geometry_timeout_s'] == .018 for args in submitted)
-    assert len([1 for _, name, _ in f.commands if name == 'JointCtrl']) == 3
-    assert [args for _, name, args in f.commands if name == 'MotionCtrl_2'] == [(1, 1, 20, 0)]*2
-    assert f.manager.view()['target_hz'] == 2
-    f.clock[0] += 1.01
-    assert f.manager.view()['target_hz'] == 0
-
-
-def test_fast_heartbeat_expires_at_one_hundred_ms_before_any_new_target(controller, monkeypatch):
-    f = controller
-    monkeypatch.setattr(Policy, 'load', lambda: Policy(ik_solver='casadi_ipopt'))
-    f.manager.open({'arm': 'left', 'speed_profile': 'fast'})
-    f.clock[0] += .101
-    with pytest.raises(RuntimeError, match='heartbeat'):
-        f.manager.step()
-    assert not f.commands
+    with pytest.raises(ValueError, match='快档已临时禁用'):
+        f.manager.open({'arm': 'left', 'speed_profile': 'fast'})
+    assert not f.commands and not f.manager.active
+    f.robot.stopped.clear()
+    f.robot.fault = None
+    opened = f.manager.open({'arm': 'left'})
+    with pytest.raises(ValueError, match='快档已临时禁用'):
+        f.manager.input({'session': opened['session'], 'sequence': 0,
+                         'keys': ['w'], 'speed_profile': 'fast'})
+    assert not f.commands and f.manager.policy.speed_profile == 'normal'
 
 
 def test_new_input_during_quiet_check_cannot_reset_trajectory_or_apply_stale_profile(controller):

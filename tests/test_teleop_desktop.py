@@ -328,22 +328,20 @@ def test_tab_speed_cycle_clears_held_motion_and_ignores_repeat():
     controls = Controls()
     controls.press('space')
     controls.press('tab')
-    assert controls.speed_profile == 'fast' and not controls.keys
+    assert controls.speed_profile == 'slow' and not controls.keys
     controls.press('tab', repeat=True)
-    assert controls.speed_profile == 'fast'
-    controls.press('tab')
     assert controls.speed_profile == 'slow'
     controls.press('tab')
     assert controls.speed_profile == 'normal'
 
 
-def test_fast_client_rejects_legacy_worker_which_ignores_profile_instead_of_claiming_fast_control():
+def test_slow_client_rejects_legacy_worker_which_ignores_profile():
     calls = []
     def rpc(path, method, args=None, **kwargs):
         calls.append((method, args))
         return {'session': 'legacy'} if method == 'teleop_open' else {'stop_confirmed': True}
     c = Client(rpc=rpc)
-    c.speed_profile = 'fast'
+    c.speed_profile = 'slow'
     with pytest.raises(RuntimeError, match='尚未加载快慢档'):
         c.execute('open', 'left')
     assert [name for name, _ in calls] == ['teleop_open', 'teleop_close']
@@ -395,17 +393,17 @@ def test_single_speed_button_cycles_and_arm_view_shortcuts_never_auto_open(windo
     window.menu_open = False
     window.controls.press('w')
     window.draw()
-    for profile in ('fast', 'slow', 'normal'):
+    for profile in ('slow', 'normal'):
         window.handle(pg.event.Event(pg.MOUSEBUTTONDOWN, button=1, pos=window.buttons['speed'].center))
         assert window.controls.speed_profile == profile and not window.controls.keys
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_TAB, repeat=False))
-    assert window.controls.speed_profile == 'fast'
+    assert window.controls.speed_profile == 'slow'
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_TAB, repeat=True))
-    assert window.controls.speed_profile == 'fast'
+    assert window.controls.speed_profile == 'slow'
     window.activate('speed')
-    assert window.controls.speed_profile == 'slow' and not window.controls.keys
+    assert window.controls.speed_profile == 'normal' and not window.controls.keys
     window.handle(pg.event.Event(pg.MOUSEWHEEL, y=-1, x=0))
-    assert window.controls.speed_profile == 'slow' and not calls
+    assert window.controls.speed_profile == 'normal' and not calls
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_F5, repeat=False))
     assert window.controls.third_person
     window.handle(pg.event.Event(pg.KEYDOWN, key=pg.K_F5, repeat=False))
@@ -451,7 +449,7 @@ def test_controls_are_below_minimap_and_menu_actions_stay_in_menu(window, size):
     window.draw()
     from astra_vla.teleop import JOINT_KEYS
     assert set(window.buttons) == {'left', 'right', 'open', 'acknowledge', 'coordinates', 'speed', 'record_window',
-                                   'demonstrations', 'retry_cameras', 'menu', 'sleep'} | JOINT_KEYS
+                                   'demonstrations', 'retry_cameras', 'menu', 'sleep', 'joint_angles'} | JOINT_KEYS
     assert all(window.sidebar_rect.contains(rect) and rect.top > window.minimap_rect.bottom
                for rect in [*window.buttons.values(), *window.key_rects.values()])
     assert all(not rect.colliderect(window.main_image_rect)
@@ -718,10 +716,10 @@ def test_startup_defaults_save_without_changing_live_selection_or_entering_contr
     assert window.controls.arm == 'left' and window.controls.speed_profile == 'normal'
     assert not window.controls.third_person and window.client.session is None
     loaded = DesktopPreferences.load(path)
-    assert loaded.startup_arm == 'right' and loaded.startup_speed == 'fast' and loaded.startup_view == 'top'
+    assert loaded.startup_arm == 'right' and loaded.startup_speed == 'slow' and loaded.startup_view == 'top'
     other = Window(DemoClient(), demo=True, preferences_path=path)
-    assert other.controls.arm == 'right' and other.controls.speed_profile == 'fast'
-    assert other.client.speed_profile == 'fast' and other.controls.third_person
+    assert other.controls.arm == 'right' and other.controls.speed_profile == 'slow'
+    assert other.client.speed_profile == 'slow' and other.controls.third_person
     assert other.client.session is None and not other.client.robot['teleop']['active']
     other.activate('restore_defaults')
     assert DesktopPreferences.load(path) == DesktopPreferences()

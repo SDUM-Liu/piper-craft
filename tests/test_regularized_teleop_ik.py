@@ -19,7 +19,10 @@ from astra_vla.config import settings
 from astra_vla.kinematics import Kinematics
 from astra_vla.teleop import Policy
 k=Kinematics(settings());k.prepare_teleop_ik()
-p=Policy.load().for_speed('fast');policy=asdict(p)
+# Historical numerical fixture, not an enabled control profile.
+from types import SimpleNamespace
+policy=asdict(Policy.load());policy.update(control_hz=50,joint_lead_deg=6,position_lead_m=.008)
+p=SimpleNamespace(**policy)
 assert 'joint_speed_deg_s' not in policy
 s={'joints_rad':np.deg2rad([0,50,-40,0,20,0]).tolist(),'gripper':{'width_m':.03},
    'controller':{'ctrl_mode':1,'motors_enabled':[True]*6}}

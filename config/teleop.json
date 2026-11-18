@@ -12,7 +12,6 @@
   "rotation_lead_deg": 0.5,
   "joint_acceleration_deg_s2": 120.0,
   "joint_lead_deg": 2.0,
-  "tcp_drift_m": 0.002,
   "axis_convention": "piper_tool",
   "ik_solver": "casadi_ipopt",
   "vertical_frame": "base",

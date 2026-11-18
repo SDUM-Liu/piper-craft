@@ -31,7 +31,7 @@ class DesktopPreferences:
     def __post_init__(self):
         if self.startup_coordinate_mode not in ('base', 'motion'):
             raise ValueError('invalid desktop coordinate mode')
-        if self.startup_arm not in ('left', 'right') or self.startup_speed not in ('slow', 'normal', 'fast') or self.startup_view not in ('wrist', 'top'):
+        if self.startup_arm not in ('left', 'right') or self.startup_speed not in ('slow', 'normal') or self.startup_view not in ('wrist', 'top'):
             raise ValueError('invalid desktop startup selection')
         if any(not isinstance(getattr(self, key), bool) for key in ('always_on_top', 'fullscreen', 'show_minimap')):
             raise ValueError('desktop switches must be boolean')
@@ -52,6 +52,8 @@ class DesktopPreferences:
         if not path.exists():
             return cls()
         data = json.loads(path.read_text())
+        if data.get('startup_speed') == 'fast':
+            data['startup_speed'] = 'normal'
         bindings = data.get('bindings', {})
         # Migrate older complete keymaps without silently overwriting a custom
         # F6 binding: choose a free fallback when F6 was already assigned.

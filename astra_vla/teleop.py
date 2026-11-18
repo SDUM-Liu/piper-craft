@@ -15,7 +15,9 @@ JOINT_KEYS = frozenset(f'joint_{axis}_{sign}' for axis in range(1, 7) for sign i
 KEYS = frozenset(('w', 's', 'a', 'd', 'space', 'lshift', 'i', 'k', 'j', 'l', 'o', 'p', 'q', 'e')) | JOINT_KEYS
 TRANSLATION_KEYS = frozenset(('w', 's', 'a', 'd', 'space', 'lshift'))
 GRIPPER_KEYS = frozenset(('q', 'e'))
-SPEED_PROFILES = ('slow', 'normal', 'fast')
+# Keep the fast configuration for later re-enabling, but reject all entrypoints.
+SPEED_PROFILES = ('slow', 'normal')
+KNOWN_SPEED_PROFILES = (*SPEED_PROFILES, 'fast')
 EXECUTION_BACKENDS = ('regularized_move_j',)
 BACKEND_LABELS = {'regularized_move_j': '本地 IK', 'controller_move_p': '控制器原生'}
 COORDINATE_MODES = ('base', 'motion')
@@ -78,7 +80,6 @@ class Policy:
     gripper_opening_lead_m: float = .001
     joint_acceleration_deg_s2: float = 20
     joint_lead_deg: float = .25
-    tcp_drift_m: float = .002
     follow_mode: str = 'position_velocity'
     axis_convention: str = 'xyz'
     vertical_frame: str = 'tcp'
@@ -86,6 +87,8 @@ class Policy:
     ik_solver: str = 'casadi_ipopt'
 
     def __post_init__(self):
+        if self.speed_profile == 'fast':
+            raise ValueError('快档已临时禁用')
         if self.speed_profile not in SPEED_PROFILES:
             raise ValueError('unknown teleop speed profile')
         fast = self.speed_profile == 'fast'
@@ -103,7 +106,7 @@ class Policy:
                       input_timeout_s=.1 if fast else .25, geometry_timeout_s=.018 if fast else .05,
                       gripper_effort=.8, speed_percent=100, position_lead_m=.008 if fast else .002,
                       rotation_lead_deg=.5, gripper_opening_lead_m=.003,
-                      joint_acceleration_deg_s2=120, joint_lead_deg=6 if fast else 2, tcp_drift_m=.002)
+                      joint_acceleration_deg_s2=120, joint_lead_deg=6 if fast else 2)
         for field in fields(self):
             if field.name in ('follow_mode', 'axis_convention', 'vertical_frame', 'coordinate_mode', 'ik_solver', 'speed_profile'):
                 continue
@@ -121,6 +124,8 @@ class Policy:
 
     def for_speed(self, name):
         """Manual profiles keep the same mechanical/joint/collision constraints."""
+        if name == 'fast':
+            raise ValueError('快档已临时禁用')
         if name not in SPEED_PROFILES:
             raise ValueError('unknown teleop speed profile')
         if self.speed_profile != 'normal':
@@ -134,7 +139,7 @@ class Policy:
         path = ROOT / 'config/teleop_speeds.json'
         profiles = json.loads(path.read_text()) if path.exists() else defaults
         allowed = set(defaults['fast'])
-        if (not isinstance(profiles, dict) or set(profiles) != set(SPEED_PROFILES) or
+        if (not isinstance(profiles, dict) or set(profiles) != set(KNOWN_SPEED_PROFILES) or
                 any(not isinstance(v, dict) or not set(v) <= allowed for v in profiles.values())):
             raise ValueError('invalid teleop speed profile configuration')
         return replace(self, speed_profile=name, **dict(defaults[name], **profiles[name]))
@@ -142,7 +147,11 @@ class Policy:
     @classmethod
     def load(cls):
         path = ROOT / 'config/teleop.json'
-        return cls(**json.loads(path.read_text())) if path.exists() else cls()
+        if not path.exists():
+            return cls()
+        data = json.loads(path.read_text())
+        data.pop('tcp_drift_m', None)  # Removed guard; accept older saved configurations.
+        return cls(**data)
 
 
 def keyset(value):
@@ -224,8 +233,6 @@ class Integrator:
         target[:3, :3] = Rotation.from_rotvec(angular * math.radians(self.policy.rotation_deg_s) * dt * motion_gain
                                             ).as_matrix() @ target[:3, :3]
         distance = np.linalg.norm(target[:3, 3] - reported[:3, 3])
-        if rotating and not translating and distance > self.policy.tcp_drift_m:
-            raise RuntimeError('fixed TCP drift exceeds 2 mm')
         if distance > self.policy.position_lead_m or rotation_error(reported, target) > math.radians(
             self.policy.rotation_lead_deg
         ):

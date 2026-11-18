@@ -13,8 +13,10 @@ class DetourControl:
         context = getattr(self, 'detour_context', None)
         if context and context.get('future'):
             context['future'].cancel()
-        if context and context.get('kind') == 'sleep' and self.sleep_return['state'] not in ('settling', 'completed'):
-            self.sleep_return['state'] = 'cancelled'
+        if context and context.get('kind') in ('sleep', 'joint_target'):
+            status = self.sleep_return if context['kind'] == 'sleep' else self.joint_target
+            if status['state'] not in ('settling', 'completed'):
+                status['state'] = 'cancelled'
         self.detour_context = None
         self.detour_slow_since = None
 
@@ -66,14 +68,15 @@ class DetourControl:
         return True
 
     def detour_blocked(self, generation, reason):
-        sleep = bool(self.detour_context and self.detour_context.get('kind') == 'sleep')
+        fixed_joint = bool(self.detour_context and self.detour_context.get('kind') in ('sleep', 'joint_target'))
+        status = (self.sleep_return if self.detour_context.get('kind') == 'sleep' else self.joint_target) if fixed_joint else None
         self.pause(generation)
         with self.mutex:
             if self.active and generation == self.generation:
                 self.blocked_generation = generation
-                if sleep:
-                    self.sleep_return.update(state='blocked', reason=reason)
-                self.reason = reason+('；重新观察后请求回 Sleep' if sleep else '；松键后重试')
+                if fixed_joint:
+                    status.update(state='blocked', reason=reason)
+                self.reason = reason+('；重新观察后重新请求关节目标' if fixed_joint else '；松键后重试')
                 self.trace.record('detour_blocked', generation=generation, reason=reason)
 
     def service_detour(self, keys, generation, before, started):
@@ -87,13 +90,15 @@ class DetourControl:
             self.pause(generation)
             return True
         sleep = context.get('kind') == 'sleep'
-        label = '回 Sleep' if sleep else '绕行'
+        fixed_joint = sleep or context.get('kind') == 'joint_target'
+        status = (self.sleep_return if sleep else self.joint_target) if fixed_joint else None
+        label = '回 Sleep' if sleep else '关节角度控制' if fixed_joint else '绕行'
         speed_percent = context.get('speed_percent', self.detour_policy.speed_percent)
         joint_lead_deg = context.get('joint_lead_deg', self.detour_policy.joint_lead_deg)
         state = before[self.arm]
         now = self.clock.monotonic()
         if context['state'] == 'starting':
-            if sleep:
+            if fixed_joint:
                 target = None
                 future = self.robot.detour_pool.submit(geometry_sleep_plan, state, context['sleep_target'],
                                                        self.geometry, asdict(self.detour_policy))
@@ -109,9 +114,9 @@ class DetourControl:
                 context.update(state='planning', future=future, started=now, before=before,
                                target=target.tolist() if target is not None else None)
                 self.phase = 'detour_planning'
-                if sleep:
-                    self.sleep_return['state'] = 'planning'
-                self.reason = '正在检查回 Sleep 关节路径；Esc或F9取消' if sleep else '正在搜索自动绕行路径；无需长按，Esc或F9取消'
+                if fixed_joint:
+                    status['state'] = 'planning'
+                self.reason = label + '：正在检查关节目标；Esc或F9取消' if fixed_joint else '正在搜索自动绕行路径；无需长按，Esc或F9取消'
                 self.trace.record('detour_planning', generation=generation, target_tcp=context['target'], route_kind=label)
             return False
         if context['state'] == 'planning':
@@ -120,7 +125,7 @@ class DetourControl:
                 return True
             if not context['future'].done():
                 self.phase = 'detour_planning'
-                self.reason = '正在检查回 Sleep 关节路径；Esc或F9取消' if sleep else '正在搜索自动绕行路径；无需长按，Esc或F9取消'
+                self.reason = label + '：正在检查关节目标；Esc或F9取消' if fixed_joint else '正在搜索自动绕行路径；无需长按，Esc或F9取消'
                 return False
             try:
                 plan = context['future'].result()
@@ -128,9 +133,9 @@ class DetourControl:
                     vector = np.asarray(plan[field], dtype=float)
                     if vector.shape != (6,) or not np.isfinite(vector).all():
                         raise ValueError('invalid detour joint plan')
-                if sleep and not np.array_equal(plan['goal_joints_rad'], context['sleep_target']['goal_joints_rad']):
+                if fixed_joint and not np.array_equal(plan['goal_joints_rad'], context['sleep_target']['goal_joints_rad']):
                     raise ValueError('sleep target changed during planning')
-                if not sleep and not np.allclose(np.asarray(plan['target_tcp']), context['target'], atol=1e-12, rtol=0):
+                if not fixed_joint and not np.allclose(np.asarray(plan['target_tcp']), context['target'], atol=1e-12, rtol=0):
                     raise ValueError('detour target changed during planning')
             except Exception as error:
                 self.detour_blocked(generation, str(error))
@@ -151,9 +156,9 @@ class DetourControl:
                     return True
                 context.update(state='executing', plan=plan, started=now, progress=0., last_progress=now)
                 self.phase = 'detour_executing'
-                if sleep:
-                    self.sleep_return['state'] = 'executing'
-                self.reason = '正在回 Sleep；Esc或F9取消' if sleep else '正在自动快速过渡到目标关节；Esc或F9取消'
+                if fixed_joint:
+                    status['state'] = 'executing'
+                self.reason = label + '：正在执行；Esc或F9取消' if fixed_joint else '正在自动快速过渡到目标关节；Esc或F9取消'
                 self.trace.record('detour_plan', generation=generation, plan=plan)
             return True
         plan = context['plan']
@@ -167,18 +172,18 @@ class DetourControl:
             context['progress'], context['last_progress'] = progress, now
         if distance <= math.radians(.1):
             actual = pose(state) @ self.integrator.tcp
-            target = np.array(plan['target_tcp']) if not sleep else None
+            target = np.array(plan['target_tcp']) if not fixed_joint else None
             if state['controller']['motion_status'] == 0:
-                if not sleep and (np.linalg.norm(actual[:3, 3]-target[:3, 3]) > self.policy.position_lead_m
+                if not fixed_joint and (np.linalg.norm(actual[:3, 3]-target[:3, 3]) > self.policy.position_lead_m
                         or rotation_error(actual, target) > math.radians(self.policy.rotation_lead_deg)):
                     self.detour_blocked(generation, '绕行关节到点但SDK末端反馈未到TCP目标')
                     return
-                self.trace.record('detour_completed', generation=generation, state=before,
+                self.trace.record(context.get('kind', 'detour') + '_arrived' if fixed_joint else 'detour_completed', generation=generation, state=before,
                                   target_tcp=plan.get('target_tcp'))
                 with self.mutex:
                     if context is self.detour_context and generation == self.generation and self.active:
-                        if sleep:
-                            self.sleep_return['state'] = 'settling'
+                        if fixed_joint:
+                            status['state'] = 'settling'
                         self.reset_detour()
                         self.integrator.reset(self.intent_state(state))
                         self.phase, self.reason = 'moving', None
@@ -275,7 +280,7 @@ class DetourControl:
             self.velocity = result['velocity']
             self.last_goal_joints = np.deg2rad(np.array(result['joint_sdk'])/1000).tolist()
             self.paused, self.phase, self.last_confirmation = False, 'detour_executing', None
-            self.reason = '正在回 Sleep；Esc或F9取消' if sleep else '正在自动快速过渡到目标关节；Esc或F9取消'
+            self.reason = label + '：正在执行；Esc或F9取消' if fixed_joint else '正在自动快速过渡到目标关节；Esc或F9取消'
             self.deadline_misses = 0
             self.accepted_keys = keys
             self.key_feedback.sent(keys)

@@ -120,7 +120,7 @@ k.prepare_teleop_ik=forbidden
 s={'joints_rad':np.deg2rad([0,50,-40,0,20,0]).tolist(),'gripper':{'width_m':.03},
    'ee_pose':{'position_m':[.4,.2,.3],'rpy_deg':[10,20,45]}}
 original=copy.deepcopy(s)
-for profile in ('slow','normal','fast'):
+for profile in ('slow','normal'):
  p=asdict(Policy.load().for_speed(profile))
  for axis in range(6):
   for sign in (-1,1):

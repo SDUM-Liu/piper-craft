@@ -63,11 +63,14 @@ class TaskArchive:
 
     def reserve(self, name, kind, **metadata):
         """Reserve before recording starts, so task finish cannot race a writer."""
-        if kind not in ('teleop', 'window') or Path(name).name != name or name in ('', '.', '..'):
+        if kind not in ('teleop', 'window', 'agent') or Path(name).name != name or name in ('', '.', '..'):
             raise ValueError('invalid recording name/kind')
         with self.locked():
-            data = self._active() or self._begin('', '')
-            relative = ('segments/' if kind == 'teleop' else 'videos/') + name
+            data = self._active()
+            if kind == 'agent' and (not data or metadata.get('task_id') != data['task_id']):
+                raise ValueError('Agent episode requires the expected active task')
+            data = data or self._begin('', '')
+            relative = {'teleop': 'segments/', 'window': 'videos/', 'agent': 'episodes/'}[kind] + name
             if any(row['path'] == relative for row in data['artifacts']):
                 raise ValueError('recording already registered')
             data['artifacts'].append({'path': relative, 'kind': kind, 'state': 'open',
@@ -79,7 +82,7 @@ class TaskArchive:
     def for_artifact(cls, path):
         path = Path(path).resolve()
         task_path = path.parent.parent
-        if path.parent.name not in ('segments', 'videos') or not (task_path / 'task.json').exists():
+        if path.parent.name not in ('segments', 'videos', 'episodes') or not (task_path / 'task.json').exists():
             return None
         archive = cls(task_path.parent.parent)
         archive.path(task_path.name)

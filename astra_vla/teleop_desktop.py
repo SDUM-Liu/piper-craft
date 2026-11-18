@@ -32,6 +32,7 @@ from astra_vla.window_recording import WindowRecording
 from astra_vla.task_archive import TaskArchive
 from astra_vla.demonstrations import DemonstrationRecording, available, select_reference, demonstration_label
 from astra_vla.step_feedback import feedback_text
+from astra_vla.joint_target import joint_target
 
 os.environ.setdefault('PYGAME_HIDE_SUPPORT_PROMPT', '1')
 
@@ -80,7 +81,7 @@ def control_message(message, telemetry=None):
         ('teleop SDK send deadline exceeded', '目标发送超时；已请求停止，请核对静止结果'),
         ('teleop input heartbeat expired', '按键心跳已断开；已取消运动输入'),
         ('teleop input timeout', '按键心跳已断开；已取消运动输入'),
-        ('fixed TCP drift exceeds', '固定TCP转向偏移超限'),
+        ('fixed TCP drift exceeds', '历史末端漂移停止记录（该软件检查已移除）'),
         ('teleop sampled path has URDF self collision', '目标路径自碰撞检查未通过'),
         ('desktop close', '已退出控制'),
         ('desktop stop', '已请求停止'),
@@ -258,6 +259,14 @@ class Client:
             self.commands.put_nowait((action, arm))
         except queue.Full:
             self.error = '控制请求繁忙；已清空按键'
+
+    def request_joint_target(self, arm, values):
+        target = joint_target(values)
+        with self.lock:
+            payload = {'session': self.session, 'arm': arm, 'joints_deg':
+                       [v / 1000 for v in target['joint_sdk']], 'epoch': self.cancel_epoch,
+                       'requested_at': time.monotonic()}
+        self.request('joint_target', payload)
 
     def request_backend(self, backend):
         if backend not in EXECUTION_BACKENDS:
@@ -450,6 +459,7 @@ class Client:
             session = self.session
         if action == 'open':
             try:
+                self.policy.for_speed(self.speed_profile)
                 if self.robot and 'teleop' not in self.robot:
                     raise RuntimeError('现有 robot worker 尚未加载遥操作接口；请按 M06 完成控制权交接并重启')
                 with self.lock:
@@ -499,6 +509,24 @@ class Client:
             with self.lock:
                 self.session, self.keys = None, []
                 self.control_active = False
+        elif action == 'joint_target':
+            with self.lock:
+                if (not session or arm['session'] != session or arm['epoch'] != self.cancel_epoch or
+                        time.monotonic() - arm['requested_at'] > .5 or not self.control_active or
+                        self.opening or self.stop_pending or self.pending_coordinate_mode or
+                        not self.focused or self.cancel_detour or self.keys or
+                        time.monotonic() - self.ui_tick > .1):
+                    raise RuntimeError('角度请求已取消或过期；请重新输入并执行')
+                self.sequence += 1
+                sequence = self.sequence
+            # Retire the editor/menu cancellation before the explicit request.
+            self.rpc(RUNTIME / 'robot.sock', 'teleop_input',
+                     {'session': session, 'sequence': sequence, 'keys': [], 'focused': True,
+                      'cancel_detour': False, 'speed_profile': self.speed_profile}, timeout=1)
+            self.rpc(RUNTIME / 'robot.sock', 'teleop_joint_target',
+                     {'session': session, 'arm': arm['arm'], 'joints_deg': arm['joints_deg'],
+                      'input_sequence': sequence}, timeout=2)
+            self.error = ''
         elif action == 'sleep':
             with self.lock:
                 if (not session or not self.control_active or self.opening or self.stop_pending or
@@ -684,6 +712,10 @@ class DemoClient:
             elif action == 'sleep':
                 self.error = '离线演示不执行 Sleep 回位；需配置位置并在实机本地会话中使用'
 
+    def request_joint_target(self, arm, values):
+        joint_target(values)
+        self.error = '离线演示不执行关节角度目标；未连接设备'
+
     def request_backend(self, backend):
         if backend not in EXECUTION_BACKENDS:
             raise ValueError('控制器原生 MOVE_P 已禁用')
@@ -740,6 +772,8 @@ class Window:
         self.buttons = {}
         self.hitboxes = []
         self.mouse_joint = None
+        self.joint_editor = None
+        self.joint_editor_notice = ''
         self.joint_rects = {}
         self.fullscreen, self.windowed_size = False, size
         pin = self.preferences.always_on_top if always_on_top is None else always_on_top
@@ -878,6 +912,9 @@ class Window:
         self.publish_intent()
 
     def activate(self, name):
+        if name in ('joint_angles', 'joint_read', 'joint_execute', 'joint_cancel') or name.startswith('joint_field:'):
+            self.joint_editor_action(name)
+            return
         if name == 'open' and self.demonstration.status()['state'] in ('recording', 'finalizing') and (
                 self.demonstration.mode == 'human_objects'):
             self.demonstration_notice = '请先结束亲手操作示范，再进入机械臂控制'
@@ -967,7 +1004,7 @@ class Window:
             self.save_preferences()
         elif name.startswith('default:'):
             field = name.partition(':')[2]
-            choices = {'startup_arm': ('left', 'right'), 'startup_speed': ('normal', 'fast', 'slow'),
+            choices = {'startup_arm': ('left', 'right'), 'startup_speed': ('normal', 'slow'),
                        'startup_view': ('wrist', 'top'), 'always_on_top': (True, False),
                        'fullscreen': (False, True), 'show_minimap': (True, False)}[field]
             value = choices[(choices.index(getattr(self.preferences, field))+1) % len(choices)]
@@ -1038,10 +1075,12 @@ class Window:
     def handle(self, event):
         pg = self.pg
         if event.type == pg.QUIT:
+            self.close_joint_editor()
             self.controls.blur()
             self.client.request('close')
             return False
         if event.type == pg.WINDOWFOCUSLOST:
+            self.close_joint_editor()
             self.focused = False
             self.controls.blur()
             self.client.request('close')
@@ -1053,6 +1092,9 @@ class Window:
             physical = self.key_name(pg, event.key)
             repeat = getattr(event, 'repeat', False)
             name = self.preferences.action(physical)
+            if self.joint_editor is not None:
+                self.handle_joint_editor_key(event, physical)
+                return True
             if not repeat and physical == 'f9':
                 self.capture_binding, self.menu_page = None, 'main'
                 self.activate('stop')
@@ -1095,6 +1137,13 @@ class Window:
                 action = self.controls.press(name, repeat)
                 if action:
                     self.client.request(action, self.controls.arm)
+        elif event.type == pg.TEXTINPUT and self.joint_editor is not None:
+            editor = self.joint_editor
+            value = ''.join(c for c in event.text if c in '0123456789+-.eE')
+            if value:
+                index = editor['index']
+                editor['values'][index] = ((editor['values'][index] if not editor['replace'] else '') + value)[:24]
+                editor['replace'] = False
         elif event.type == pg.KEYUP:
             self.controls.release(self.preferences.action(self.key_name(pg, event.key)))
         elif event.type == pg.MOUSEBUTTONUP and event.button == 1:
@@ -1281,7 +1330,8 @@ class Window:
         local = self.client.execution_backend == 'regularized_move_j'
         active = bool(self.client.session and self.client.robot.get('teleop', {}).get('active'))
         label = '关节 · 按住点动' if local else '关节 · 请切本地方案'
-        self.text(label, (panel.x+6, panel.y+2), font=self.small)
+        self.text('关节点动' if local else label, (panel.x+6, panel.y+2), font=self.small)
+        self.button('joint_angles', '角度输入', pg.Rect(panel.right-92, panel.y+1, 86, 23))
         self.joint_rects = {}
         cell = (panel.width-18)//4
         for axis in range(1, 7):
@@ -1293,6 +1343,104 @@ class Window:
                 color = (145, 119, 52) if held else ((75, 82, 93) if active and local else (48, 50, 54))
                 self.button(key, f'J{axis}'+('−' if sign == 0 else '+'), rect, color)
                 self.joint_rects[key] = rect
+
+    def close_joint_editor(self):
+        self.joint_editor = None
+        self.pg.key.stop_text_input()
+
+    def joint_editor_action(self, name):
+        if name == 'joint_angles':
+            self.controls.blur()
+            self.mouse_joint = None
+            self.menu_open = True
+            self.publish_intent()
+            self.joint_editor = {'arm': self.controls.arm, 'session': self.client.session,
+                                 'values': [''] * 6, 'index': 0, 'replace': True}
+            self.joint_editor_notice = ''
+            self.joint_editor_action('joint_read')
+            self.pg.key.start_text_input()
+        elif self.joint_editor is not None:
+            editor = self.joint_editor
+            if name == 'joint_read':
+                state = self.client.robot.get('arms', {}).get(editor['arm'], {})
+                values = state.get('joints_rad', [])
+                if (len(values) != 6 or not all(math.isfinite(v) for v in values) or
+                        (not self.demo and not fresh_frame(state))):
+                    self.joint_editor_notice = '当前关节反馈不可用；等待新鲜 SDK 反馈后读取'
+                    return
+                editor['values'] = [f'{math.degrees(v):.3f}' for v in values]
+                editor['replace'] = True
+                self.joint_editor_notice = '已读取当前 SDK 角度；修改后点击执行'
+            elif name == 'joint_cancel':
+                self.close_joint_editor()
+                self.menu_open = False
+                self.publish_intent()
+            elif name.startswith('joint_field:'):
+                editor['index'], editor['replace'] = int(name.partition(':')[2]), True
+            elif name == 'joint_execute':
+                try:
+                    if (not editor['session'] or editor['session'] != self.client.session or
+                            self.controls.arm != editor['arm'] or self.client.opening or
+                            not self.client.robot.get('teleop', {}).get('active')):
+                        raise ValueError('请先为所选臂进入控制，再打开角度输入')
+                    values = [float(value) for value in editor['values']]
+                    joint_target(values)
+                    self.controls.blur()
+                    self.menu_open = False
+                    self.publish_intent()
+                    self.client.request_joint_target(editor['arm'], values)
+                    self.close_joint_editor()
+                except (ValueError, RuntimeError) as exc:
+                    self.joint_editor_notice = str(exc)
+
+    def handle_joint_editor_key(self, event, physical):
+        pg, editor = self.pg, self.joint_editor
+        if physical == 'f9':
+            self.close_joint_editor()
+            self.activate('stop')
+        elif physical == 'escape':
+            self.joint_editor_action('joint_cancel')
+        elif physical == 'tab':
+            editor['index'] = (editor['index'] + (-1 if getattr(event, 'mod', 0) & pg.KMOD_SHIFT else 1)) % 6
+            editor['replace'] = True
+        elif physical == 'return' and not getattr(event, 'repeat', False):
+            self.joint_editor_action('joint_execute')
+        elif physical == 'a' and getattr(event, 'mod', 0) & pg.KMOD_CTRL:
+            editor['replace'] = True
+        elif physical in ('backspace', 'delete'):
+            index = editor['index']
+            editor['values'][index] = '' if editor['replace'] or physical == 'delete' else editor['values'][index][:-1]
+            editor['replace'] = False
+
+    def draw_joint_editor(self):
+        pg, editor = self.pg, self.joint_editor
+        width, height = self.screen.get_size()
+        self.shade(self.screen.get_rect(), 205)
+        rect = pg.Rect((width-620)//2, (height-438)//2, 620, 438)
+        self.joint_editor_rect = rect
+        self.panel(rect, (38, 42, 48))
+        # Modal hit testing owns the entire input layer, including its background.
+        self.buttons, self.hitboxes = {}, []
+        self.text(('左臂' if editor['arm'] == 'left' else '右臂') + ' · 关节绝对角度（度）',
+                  (rect.x+20, rect.y+15), font=self.menu_font)
+        self.text('填写 J1–J6 目标；Tab 换项 · Enter 执行 · Esc 取消 · F9 停止',
+                  (rect.x+20, rect.y+58), font=self.small)
+        self.joint_field_rects = []
+        for axis in range(6):
+            column, row = axis % 2, axis // 2
+            field = pg.Rect(rect.x+58+column*292, rect.y+106+row*62, 220, 40)
+            self.joint_field_rects.append(field)
+            self.text(f'J{axis+1}', (field.x-36, field.y+10), font=self.small)
+            self.button(f'joint_field:{axis}', editor['values'][axis], field, (63, 72, 83))
+            if axis == editor['index']:
+                pg.draw.rect(self.screen, (250, 215, 105), field, 2)
+        for index, (name, label) in enumerate((('joint_read', '读取当前角度'),
+                                               ('joint_execute', '执行关节目标'), ('joint_cancel', '取消'))):
+            self.button(name, label, pg.Rect(rect.x+20+index*198, rect.y+304, 184, 36))
+        self.text('普通 MOVE_J · 当前档位 · 到位后确认静止', (rect.x+20, rect.y+352), font=self.small)
+        for index, line in enumerate(wrap_text(self.joint_editor_notice, self.small, rect.width-40)[:2]):
+            self.text(line, (rect.x+20, rect.y+382+index*self.small.get_linesize()),
+                      (255, 220, 120), self.small)
 
     def draw_menu(self, opening):
         pg = self.pg
@@ -1536,9 +1684,9 @@ class Window:
         if blocker:
             normal_exit = str(blocker) in ('desktop close', 'desktop control closed', 'desktop escape', 'desktop stop',
                                            '离线模拟已停止；未连接设备')
-            sleep_notice = (not error and not robot.get('fault') and
-                            telemetry.get('sleep_return', {}).get('state') in
-                            ('waiting', 'planning', 'executing', 'settling', 'completed'))
+            sleep_notice = (not error and not robot.get('fault') and any(
+                telemetry.get(kind, {}).get('state') in ('waiting', 'planning', 'executing', 'settling', 'completed')
+                for kind in ('sleep_return', 'joint_target')))
             informational = normal_exit or sleep_notice
             current['控制'] = (('' if informational else '无法执行：') + control_message(blocker, telemetry).replace('F3', self.key_label('f3')),
                                (190, 220, 190) if informational else (255, 100, 100))
@@ -1647,9 +1795,11 @@ class Window:
         self.joint_rects = {}
         if self.show_hud:
             self.draw_joint_buttons()
-        if self.menu_open:
+        if self.menu_open and self.joint_editor is None:
             self.draw_menu(opening)
         self.draw_chat(robot, telemetry, error, camera_error)
+        if self.joint_editor is not None:
+            self.draw_joint_editor()
         recording = self.recording.status()
         if recording['state'] != self.recording_seen:
             self.recording_seen = recording['state']

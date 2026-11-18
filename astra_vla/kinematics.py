@@ -440,10 +440,10 @@ class Kinematics:
             path_joints.append(candidate[:6].tolist())
         return {'reachable': True, 'joint_sdk': integers.tolist(), 'velocity': velocity.tolist(),
                 'tcp_target': target_tcp.tolist(),
-                # Advisory for endpoint replanning, not an ordinary-jog angle
-                # rejection. Keep the controller responsible for normal limits.
-                'detour_recommended': not joint_jog and bool(np.any(goal[:6]+velocity < self.model.lowerPositionLimit[:6])
-                                           or np.any(goal[:6]+velocity > self.model.upperPositionLimit[:6])),
+                # A nominal URDF boundary must not divert or block a feasible
+                # ordinary jog. Low IK progress still triggers branch search;
+                # physical joint-angle limits remain controller-owned.
+                'detour_recommended': False,
                 'joint_limit_status': [], 'joint_position_limits': 'controller',
                 'ik': dict(validated_goal['ik'], fresh_target_rechecked=True) if validated_goal is not None else
                       ({'solver': 'joint_jog', 'progress_fraction': float(

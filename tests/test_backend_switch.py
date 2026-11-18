@@ -8,7 +8,7 @@ controller = fixtures.controller
 
 
 @pytest.mark.parametrize('arm', ['left', 'right'])
-@pytest.mark.parametrize('profile', ['slow', 'normal', 'fast'])
+@pytest.mark.parametrize('profile', ['slow', 'normal'])
 def test_native_request_is_rejected_without_preparation_or_sdk(controller, arm, profile):
     with pytest.raises(ValueError, match='已禁用'):
         controller.manager.open({'arm': arm, 'speed_profile': profile, 'execution_backend': 'controller_move_p'})
