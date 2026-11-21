@@ -93,7 +93,7 @@ class WindowRecording:
                 raise RuntimeError('窗口录像仍在收尾，请检查磁盘与编码器')
 
     def encode(self):
-        container, failure, last_pts = None, '', -1
+        container, failure, first_pts, last_pts = None, '', None, -1
         try:
             import av
             import cv2
@@ -122,6 +122,11 @@ class WindowRecording:
                 last_pts, frame.time_base = frame.pts, Fraction(1, 1000)
                 for packet in stream.encode(frame):
                     container.mux(packet)
+                if first_pts is None:
+                    first_pts = last_pts
+                    if self.task_archive:
+                        self.task_archive.update(self.path.parent, recording_state='recording',
+                                                 first_frame_stamp=self.wall_started+first_pts/1000)
                 with self.lock:
                     self.frames += 1
             for packet in stream.encode():
@@ -141,6 +146,7 @@ class WindowRecording:
                             'path': str(self.path), 'size': self.size, 'fps_limit': self.fps,
                             'start_stamp': self.wall_started, 'finish_stamp': time.time(),
                             'frames': self.frames, 'dropped_frames': self.dropped,
+                            'first_frame_s': None if first_pts is None else first_pts/1000,
                             'last_frame_s': max(0, last_pts)/1000,
                             'closed': not failure, 'error': failure, 'audio': False,
                             'robot_motion_verified': False}

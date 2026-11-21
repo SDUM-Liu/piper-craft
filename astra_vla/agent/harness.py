@@ -73,28 +73,37 @@ class PolicyStore:
     def __init__(self, directory):
         self.directory = Path(directory)
 
-    def freeze(self, *, name, parameters, skill_versions, parent=None, hypothesis=None, ablation='D'):
+    def freeze(self, *, name, parameters, skill_versions, parent=None, hypothesis=None, ablation='D',
+               scope='offline_image_alignment'):
         identifier(name)
         if ablation not in ABLATIONS or not skill_versions:
             raise ValueError('ablation and frozen skills required')
-        if set(parameters) != {'gain'} or not 0 < number(parameters['gain']) <= 1:
-            raise ValueError('phase one changes only the image-servo gain')
+        if scope == 'offline_image_alignment':
+            target = 'align_image.gain'
+            if set(parameters) != {'gain'} or not 0 < number(parameters['gain']) <= 1:
+                raise ValueError('image alignment changes only the image-servo gain')
+        elif scope == 'offline_view_selection':
+            target = 'select_views.first_view'
+            if set(parameters) != {'first_view'} or parameters['first_view'] not in ('auxiliary', 'operator'):
+                raise ValueError('view selection changes only which wrist is examined first')
+        else:
+            raise ValueError('unsupported policy scope')
         if parent:
             old = self.load(parent)
-            if old['ablation'] != ablation:
-                raise ValueError('candidate must remain in the same ablation group')
+            if old['ablation'] != ablation or old['scope'] != scope:
+                raise ValueError('candidate must remain in the same ablation group and scope')
             if not ABLATIONS[ablation]['skill_changes'] or not hypothesis or hypothesis.get('status') != 'hypothesis':
                 raise ValueError('candidate needs a hypothesis and a skill-changing arm')
             if old['parameters'] == parameters or old['skill_versions'] != skill_versions:
                 raise ValueError('candidate must change one parameter, keeping implementation/skills fixed')
-            if hypothesis.get('modification_target') != 'align_image.gain':
-                raise ValueError('hypothesis does not justify a gain candidate')
+            if hypothesis.get('modification_target') != target or not hypothesis.get('evidence'):
+                raise ValueError('candidate requires evidence supporting its specific parameter')
             for evidence in hypothesis['evidence']:
                 if file_digest(evidence['path']) != evidence['sha256']:
                     raise ValueError('hypothesis evidence changed')
         record = dict(name=name, parameters=deepcopy(parameters), skill_versions=deepcopy(skill_versions),
                       parent=parent, hypothesis=deepcopy(hypothesis), ablation=ablation,
-                      scope='offline_image_alignment', sources={str(p.resolve()): file_digest(p)
+                      scope=scope, sources={str(p.resolve()): file_digest(p)
                                                                 for p in sorted(Path(__file__).parent.glob('*.py'))})
         revision = digest(record)
         with locked(self.directory):
@@ -155,7 +164,7 @@ class PairedHarness:
         record = dict(comparison_id=unique('comparison'), parent=parent, candidate=candidate,
                       development_cases=dev, validation_cases=val, conditions=deepcopy(conditions),
                       minimum_pairs=minimum_pairs, minimum_gain=minimum_gain, alpha=alpha,
-                      comparison_budget=comparison_budget, scope='offline_image_alignment',
+                      comparison_budget=comparison_budget, scope=old['scope'],
                       method='paired_permutation_fixed_n', score='task_success')
         with locked(self.directory):
             # Do not tune on the same declared validation cases in a second round.
@@ -326,5 +335,5 @@ class PairedHarness:
                 raise ValueError('default parent changed since comparison')
             atomic_json(path, {'revision': report['candidate'], 'parent': report['parent'],
                                'comparison_id': comparison_id, 'selection_sha256': digest(report),
-                               'scope': 'offline_image_alignment'})
+                               'scope': report['scope']})
         return report

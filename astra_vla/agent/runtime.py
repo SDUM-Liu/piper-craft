@@ -23,7 +23,7 @@ class ReadOnlyPiper:
     def observe(self, directory):
         metadata = capture(directory, rpc=self.rpc)
         feedback = self.rpc(RUNTIME/'robot.sock', 'status', timeout=1)
-        return observe_scene(metadata, feedback, self.provider, mode=self.mode)
+        return observe_scene(metadata, feedback, self.provider, mode='live_readonly')
 
     def move(self, delta):
         raise RuntimeError('phase-one live adapter is read-only; desktop control integration not qualified')

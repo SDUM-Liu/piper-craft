@@ -11,6 +11,7 @@ dependencies = [
   "av>=13,<17",
   "pygame-ce>=2.5,<3",
   "pyrealsense2==2.55.1.6486",
+  "pyjwt[crypto]>=2.10,<3",
 ]
 
 [dependency-groups]
@@ -24,6 +25,7 @@ piper-craft-memory = "astra_vla.operation_memory:main"
 piper-craft-demonstrations = "astra_vla.demonstrations:main"
 piper-craft-task-memory = "astra_vla.task_memory:main"
 piper-craft-task = "astra_vla.task_archive:main"
+piper-craft-agent = "astra_vla.agent.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

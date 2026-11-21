@@ -1,4 +1,57 @@
-# Agent 第一阶段：证据、可执行技能与离线配对闭环
+# Piper Craft 本地 Agent
+
+## 入口
+
+```bash
+.venv/bin/python -m astra_vla.agent simulate --output /tmp/piper-shuttle-run
+.venv/bin/python -m astra_vla.agent validate-views --output /tmp/piper-view-validation
+.venv/bin/python -m astra_vla.agent auth login
+.venv/bin/python -m astra_vla.agent auth models
+.venv/bin/python -m astra_vla.agent session --task-id TASK_ID --contract CONTRACT.json --model MODEL_SLUG
+.venv/bin/python -m astra_vla.agent state --task-id TASK_ID
+```
+
+`piper-craft-agent` 提供相同入口。保留 `inspect` 和 `experiment`。TaskArchive 的 `begin` 或现有任务绑定提供 TASK_ID。普通 `session` 读三路源 PNG、双臂 SDK、遥操作状态和整窗录像归属。它使用本地工具和模型 HTTP 调用，Codex 无需安装或启动。桌面的公开消息显示仍可单独使用。
+
+### 运行时结构
+
+| 职责 | 实现 |
+| --- | --- |
+| 命令入口 | [`__main__.py`](../astra_vla/agent/__main__.py) 提供登录、模拟、任务会话、状态和技能验证命令 |
+| 模型和会话 | [`chatgpt.py`](../astra_vla/agent/chatgpt.py) 管理授权，[`responses.py`](../astra_vla/agent/responses.py) 读取流，[`session.py`](../astra_vla/agent/session.py) 组装上下文、校验工具参数、执行和回传 |
+| 任务状态和证据 | [`task_state.py`](../astra_vla/agent/task_state.py) 与 [`episode.py`](../astra_vla/agent/episode.py) 把当前阶段、证据引用和工具回执写入 TaskArchive |
+| 可执行技能 | [`task_skills.py`](../astra_vla/agent/task_skills.py) 定义机器人技能，[`skills.py`](../astra_vla/agent/skills.py) 注册版本，[`harness.py`](../astra_vla/agent/harness.py) 冻结候选并做配对选择 |
+| 现场执行 | [`desktop_control.py`](../astra_vla/agent/desktop_control.py) 将已授权的动作交给现有桌面控制和本地运动守护 |
+
+每轮从快照取得当前阶段及待证条件。模型选一个工具，本地运行时验证并执行，记录回执后进入下一轮。任务合同通过 JSON 传入，工具和技能实现由 Python 显式注册。当前技能候选支持视角排序参数。
+
+### ChatGPT 套餐授权
+
+`auth login` 打开系统浏览器，由操作者选择账号和工作区。应用用 Piper Craft 名称发起动态注册，验证环回回调 state、PKCE、OIDC nonce、签名、受众和发行者，再按账号保存 OpenAI 发放的客户端 ID。凭据写入 `$XDG_CONFIG_HOME/piper-craft/chatgpt/accounts.json`，默认根目录为 `~/.config`，目录 0700，文件 0600。独立账号记录共用本机的稳定 host ID。刷新在文件锁内换入轮换后的 refresh token。 `auth list` 显示应用识别的账号，`auth select --account ID` 切换，`auth login --account ID` 重授，`auth logout [--account ID]` 撤销会话并清除本地令牌。远端撤销无法确认时结果明确标记。
+
+模型目录来自 `GET https://api.openai.com/v1/models`。推理使用授权给 Piper Craft 的 token 直连 `POST https://api.openai.com/v1/responses`，设置 `store=false`、`stream=true`，用命名空间函数、工具结果和必要的连续轮次上下文完成交互。只有 `response.completed` 可以进入执行。权限缺失、订阅资格、额度和流中断分别返回错误；请求只走 ChatGPT 套餐授权。可在 [ChatGPT 用量设置](https://chatgpt.com/settings/usage) 查看用量。 [注册协议](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) · [会话协议](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions) · [推理协议](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+
+### 任务快照与工具
+
+任务合同包含有序 `phases`、`visual_conditions` 和要求录制的 `record_phases`。可用 `phase_conditions` 声明阶段退出前必须证实的实物条件。羽毛球模拟合同见 `astra_vla/agent/shuttle_sim.py`。完成阶段后，已复核的阶段条件作为历史判断保留，回退阶段会要求重新取证。
+
+`runs/TASK_ID/agent_state.json` 保存当前阶段、双臂角色与实读模式、最近动作的 SDK 到位结果、录像状态和覆盖、模型视觉判断与待补条件。覆盖以任务绑定的录像首末帧时间包住该阶段已记录的动作区间为准，录制进行中保留未知。Episode 保存工具调用、原图索引、动作回执、每轮输入大小和模型用量，以及独立评价。 `frames` 按任务内的观测 ID、相机名和摘要取源帧，`events` 按 Episode 查日志，`references` 与 `demonstration_frame` 提取历史参考。模型提交的判断同时记录观测时间和已交付的源帧。过期、互相冲突或被后续动作影响的判断进入待复核。
+
+运行器会在工具发送动作前持久化意图，随后单独记录 SDK 到位。恢复会话先读当前 SDK 和 RGB。进程退出前缺回执的动作保留为未知。请求完成前断流或取消会停止本轮，重复调用与结果未知的动作由运行器检查。
+
+### 现场桌面入口
+
+带 `--agent-task TASK_ID --agent-contract CONTRACT.json --agent-model MODEL_SLUG` 启动现有 `astra_vla.teleop_desktop`，可选 `--agent-account ID`。操作者在现场窗口按 F7 启动或中断 Agent。窗口维持原有控制进入和选臂流程。动作只能走当前选臂、真实窗口焦点、当前普通 MOVE_J 会话，合同须在 `action_conditions[阶段][move_arm 或 gripper]` 指明该动作所需的当前视觉条件。先核对源帧年龄、双臂 SDK 与控制状态。关节工具经现有 J1–J6 目标路径，夹爪工具使用限时 Q/E 与松键后的实读反馈。失焦、菜单、手动输入、F9、换臂和反馈超时中断相应动作。夹爪 SDK 回执只描述执行反馈，抓住和释放由视觉或独立验收确认。该入口的现场动作尚待真机验收。
+
+只读服务通过 `./start.sh --no-window` 启动。顶视需要现有 ROS 主节点和 `/top_camera/color/image_raw` 发布者，由用户的 ROS 工作区提供。双腕由本项目的 RGB worker 根据设备身份读取。
+
+### 技能候选
+
+内置可执行技能包含观察视角优先顺序、动作后待补证据和组合式交接核查。每个 Episode 固定技能和策略版本。模型可调用 `propose_view_revision`，引用已关闭的开发 Episode 提案。用 `validate-views --proposal FILE` 冻结候选并跑成对验证，FILE 为 Episode 中的一个 `candidate_proposals` 对象。验证回归时保留父版本；通过时，生成带证据的可用版本。只读 `session --skill-directory DIR` 可显式选用该版本，加 `--skill-revision REV` 可回滚到父版本。当前独立配对只验收合成场景中的视角排序参数，交接组合使用固定流程。图像平面配对实验见下节。
+
+`simulate --model MODEL_SLUG` 允许通过所选账号对合成场景做真实模型联调。普通 `simulate` 本地使用固定 SSE 测试替身并保留断流前后的过程。实际结果见 [验收记录](agent_validation.md)。
+
+## 既有二维图像平面实验
 
 本阶段交付一个可运行、可测试的窄闭环：原始三路 PNG → 配置颜色区域/二维特征 → 本地技能选择与误差反馈 → 隔离的图像平面实验 → 独立评价 → System 2 单因素假设 → 候选冻结 → 配对选择。它尚不是通用视觉抓取 Agent。
 

@@ -8,7 +8,13 @@ class SleepReturn:
 
     def set_joint_target(self, args):
         from astra_vla.joint_target import joint_target
-        return self.request_joint_route(args, joint_target(args.get('joints_deg')), 'joint_target')
+        target = joint_target(args.get('joints_deg'))
+        request_id = args.get('request_id')
+        if request_id is not None:
+            if not isinstance(request_id, str) or not request_id.isascii() or not request_id.isidentifier() or len(request_id) > 64:
+                raise ValueError('invalid joint target request ID')
+            target['request_id'] = request_id
+        return self.request_joint_route(args, target, 'joint_target')
 
     def request_joint_route(self, args, target, kind):
         label = '回 Sleep' if kind == 'sleep' else '关节角度控制'

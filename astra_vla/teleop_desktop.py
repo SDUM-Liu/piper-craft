@@ -260,12 +260,14 @@ class Client:
         except queue.Full:
             self.error = '控制请求繁忙；已清空按键'
 
-    def request_joint_target(self, arm, values):
+    def request_joint_target(self, arm, values, *, request_id=None):
         target = joint_target(values)
         with self.lock:
             payload = {'session': self.session, 'arm': arm, 'joints_deg':
                        [v / 1000 for v in target['joint_sdk']], 'epoch': self.cancel_epoch,
                        'requested_at': time.monotonic()}
+        if request_id is not None:
+            payload['request_id'] = request_id
         self.request('joint_target', payload)
 
     def request_backend(self, backend):
@@ -523,9 +525,11 @@ class Client:
             self.rpc(RUNTIME / 'robot.sock', 'teleop_input',
                      {'session': session, 'sequence': sequence, 'keys': [], 'focused': True,
                       'cancel_detour': False, 'speed_profile': self.speed_profile}, timeout=1)
-            self.rpc(RUNTIME / 'robot.sock', 'teleop_joint_target',
-                     {'session': session, 'arm': arm['arm'], 'joints_deg': arm['joints_deg'],
-                      'input_sequence': sequence}, timeout=2)
+            arguments = {'session': session, 'arm': arm['arm'], 'joints_deg': arm['joints_deg'],
+                         'input_sequence': sequence}
+            if 'request_id' in arm:
+                arguments['request_id'] = arm['request_id']
+            self.rpc(RUNTIME / 'robot.sock', 'teleop_joint_target', arguments, timeout=2)
             self.error = ''
         elif action == 'sleep':
             with self.lock:
@@ -747,6 +751,8 @@ class Window:
             self.preferences = DesktopPreferences()
             self.settings_notice = '界面配置读取失败，已使用默认：'+str(exc)
         self.controls = Controls()
+        self.agent = None
+        self.agent_notice = ''
         self.controls.arm = self.preferences.startup_arm
         self.controls.speed_profile = self.preferences.startup_speed
         self.controls.third_person = self.preferences.startup_view == 'top'
@@ -903,7 +909,17 @@ class Window:
                     not self.pg.mouse.get_pressed()[0]):
                 self.controls.keys.discard(self.mouse_joint)
                 self.mouse_joint = None
-        self.client.intent(self.controls, self.focused, cancel_detour=self.menu_open)
+        controls = self.controls
+        if self.agent and self.agent.backend:
+            key = self.agent.backend.pump(focused=self.focused and self.pg.key.get_focused(),
+                                          menu=self.menu_open, arm=controls.arm, manual_keys=controls.keys)
+            if key:
+                controls = copy.copy(controls)
+                controls.keys = {key}
+        self.client.intent(controls, self.focused, cancel_detour=self.menu_open)
+        if self.agent and self.agent.notice != self.agent_notice:
+            self.agent_notice = self.agent.notice
+            self.pg.display.set_caption('PIPER CRAFT · '+self.agent_notice)
 
     def toggle_menu(self):
         self.controls.blur()
@@ -912,6 +928,8 @@ class Window:
         self.publish_intent()
 
     def activate(self, name):
+        if self.agent and name in ('stop', 'close'):
+            self.agent.interrupt()
         if name in ('joint_angles', 'joint_read', 'joint_execute', 'joint_cancel') or name.startswith('joint_field:'):
             self.joint_editor_action(name)
             return
@@ -1075,11 +1093,15 @@ class Window:
     def handle(self, event):
         pg = self.pg
         if event.type == pg.QUIT:
+            if self.agent:
+                self.agent.interrupt()
             self.close_joint_editor()
             self.controls.blur()
             self.client.request('close')
             return False
         if event.type == pg.WINDOWFOCUSLOST:
+            if self.agent:
+                self.agent.interrupt()
             self.close_joint_editor()
             self.focused = False
             self.controls.blur()
@@ -1095,7 +1117,10 @@ class Window:
             if self.joint_editor is not None:
                 self.handle_joint_editor_key(event, physical)
                 return True
-            if not repeat and physical == 'f9':
+            if self.agent and not repeat and physical == 'f7':
+                if self.focused and pg.key.get_focused():
+                    self.agent.toggle()
+            elif not repeat and physical == 'f9':
                 self.capture_binding, self.menu_page = None, 'main'
                 self.activate('stop')
             elif not repeat and physical == 'escape':
@@ -1827,9 +1852,20 @@ def main():
     parser.add_argument('--no-always-on-top', action='store_true', help='start without the default always-on-top flag')
     parser.add_argument('--codex-messages', type=Path,
                         help='public Codex JSONL source (default: .runtime/codex_messages.jsonl; demo reads only if explicit)')
+    parser.add_argument('--agent-task', help='enable on-site F7 Agent control for this active task ID')
+    parser.add_argument('--agent-contract', type=Path)
+    parser.add_argument('--agent-model')
+    parser.add_argument('--agent-account')
     args = parser.parse_args()
     if args.screenshot and not args.demo:
         parser.error('--screenshot requires --demo')
+    if any((args.agent_task, args.agent_contract, args.agent_model, args.agent_account)):
+        if args.demo or not all((args.agent_task, args.agent_contract, args.agent_model)):
+            parser.error('Agent desktop requires --agent-task, --agent-contract and --agent-model on the real desktop')
+        try:
+            agent_contract = json.loads(args.agent_contract.read_text())
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
     try:
         import pygame
     except ImportError:
@@ -1844,6 +1880,10 @@ def main():
     client = DemoClient() if args.demo else Client()
     window = Window(client, demo=args.demo, always_on_top=False if args.no_always_on_top else None,
                     codex_messages_path=args.codex_messages)
+    if args.agent_task:
+        from astra_vla.agent.desktop_control import DesktopAgent
+        window.agent = DesktopAgent(client, model_name=args.agent_model, account=args.agent_account,
+                                    contract=agent_contract, task_id=args.agent_task)
     client.start()
     clock = pygame.time.Clock()
     exit_requested = threading.Event()
@@ -1865,6 +1905,8 @@ def main():
             clock.tick(60)
     finally:
         try:
+            if window.agent:
+                window.agent.interrupt()
             client.shutdown()
         finally:
             try:
